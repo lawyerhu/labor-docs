@@ -61,6 +61,14 @@ class InternalOtpInput(BaseModel):
     code: str = Field(pattern=r"^\d{6}$")
 
 
+class InternalCaseAnalysisInput(BaseModel):
+    facts: str = Field(min_length=1, max_length=20000)
+    claims_text: str = Field(min_length=1, max_length=10000)
+    supplement: str = Field(default="", max_length=20000)
+    current_data: dict[str, Any] = Field(default_factory=dict)
+    round: Literal[1, 2] = 1
+
+
 class ExtractionPatch(BaseModel):
     """Only these case-data keys may be returned by a configured language model."""
 

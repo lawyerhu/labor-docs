@@ -10,6 +10,7 @@ pypdf==6.0.0
 reportlab==4.4.3
 pillow==11.3.0
 httpx==0.28.1
+mcp==1.24.0
 email-validator==2.2.0
 celery==5.5.3
 redis==6.4.0

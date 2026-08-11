@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     openai_model: str | None = None
     yuandian_endpoint: str | None = None
     yuandian_token: str | None = None
+    yuandian_law_mcp_url: str = "https://open.chineselaw.com/mcp/law/stream"
+    yuandian_case_mcp_url: str = "https://open.chineselaw.com/mcp/case/stream"
+    yuandian_company_mcp_url: str = "https://open.chineselaw.com/mcp/company/stream"
     generator_internal_token: str | None = None
     worker_internal_url: str | None = None
     worker_internal_token: str | None = None

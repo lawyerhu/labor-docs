@@ -1,50 +1,51 @@
 "use client";
 
-import { ArrowLeft, ArrowRight, Building2, Gavel, Scale, UserRound } from "lucide-react";
+import { ArrowLeft, ArrowRight, ShieldCheck, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
-import { api, CaseRecord, CaseStage, PartySide } from "@/lib/api";
+import { api, CaseRecord } from "@/lib/api";
 
 export default function NewCasePage() {
   const router = useRouter();
-  const [stage, setStage] = useState<CaseStage>("litigation");
-  const [side, setSide] = useState<PartySide>("employer");
-  const [title, setTitle] = useState("不服劳动仲裁裁决");
+  const [facts, setFacts] = useState("");
+  const [claims, setClaims] = useState("");
+  const [consent, setConsent] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   async function submit(event: FormEvent) {
-    event.preventDefault(); setLoading(true); setError("");
+    event.preventDefault();
+    if (!consent) { setError("请先同意将本次案情文本发送至大模型和元典进行分析"); return; }
+    setLoading(true); setError("");
     try {
-      const record = await api<CaseRecord>("/api/cases", { method: "POST", body: JSON.stringify({ title, case_stage: stage, party_side: side }) });
+      const record = await api<CaseRecord>("/api/cases", {
+        method: "POST",
+        body: JSON.stringify({ facts, claims_text: claims }),
+      });
+      await api(`/api/cases/${record.id}/chat`, {
+        method: "POST",
+        body: JSON.stringify({ message: "开始分析", consent_cloud_processing: true }),
+      });
       router.push(`/cases/${record.id}`);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "创建失败"); setLoading(false); }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "案件分析失败，请稍后重试");
+      setLoading(false);
+    }
   }
 
-  return (
-    <main className="setup-page" id="main-content">
-      <header className="setup-header"><Link href="/dashboard" className="text-link"><ArrowLeft size={17} /> 返回案件</Link><span>新建案件</span><span /></header>
-      <form className="setup-form" onSubmit={submit}>
-        <div className="setup-progress"><span className="active" /><span /><span /><small>1 / 3</small></div>
-        <div className="eyebrow"><span /> 两项必要信息</div>
-        <h1>先确定文书方向</h1>
-        <p className="setup-lead">这两项决定使用哪套模板。其他信息都可以稍后补充，不会阻止生成正式稿。</p>
-
-        <fieldset className="choice-field"><legend>当前处于哪个阶段？</legend><div className="choice-grid">
-          <button type="button" className={`choice-card ${stage === "arbitration" ? "selected" : ""}`} onClick={() => { setStage("arbitration"); setTitle("劳动争议仲裁申请"); }}><span className="choice-icon"><Gavel /></span><span><strong>准备申请劳动仲裁</strong><small>还没有仲裁裁决书</small></span><i /></button>
-          <button type="button" className={`choice-card ${stage === "litigation" ? "selected" : ""}`} onClick={() => { setStage("litigation"); setTitle("不服劳动仲裁裁决"); }}><span className="choice-icon"><Scale /></span><span><strong>仲裁后准备起诉</strong><small>已经取得仲裁裁决</small></span><i /></button>
-        </div></fieldset>
-
-        <fieldset className="choice-field"><legend>申请人或原告是哪一方？</legend><div className="choice-grid">
-          <button type="button" className={`choice-card ${side === "worker" ? "selected" : ""}`} onClick={() => setSide("worker")}><span className="choice-icon"><UserRound /></span><span><strong>劳动者</strong><small>本人或代理人使用</small></span><i /></button>
-          <button type="button" className={`choice-card ${side === "employer" ? "selected" : ""}`} onClick={() => setSide("employer")}><span className="choice-icon"><Building2 /></span><span><strong>用人单位</strong><small>公司负责人或经办人使用</small></span><i /></button>
-        </div></fieldset>
-
-        <label className="field setup-title"><span>案件名称</span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={200} required /><small>仅用于工作台识别，不写入正式文书。</small></label>
-        {error && <div className="form-error">{error}</div>}
-        <button className="button button-primary button-large setup-submit" disabled={loading}>{loading ? "正在创建…" : <>创建并开始整理 <ArrowRight size={18} /></>}</button>
-      </form>
-    </main>
-  );
+  return <main className="intake-page" id="main-content">
+    <header className="setup-header"><Link href="/dashboard" className="text-link"><ArrowLeft size={17} /> 返回案件</Link><span>创建案件</span><span /></header>
+    <form className="intake-card" onSubmit={submit}>
+      <div className="eyebrow"><span /> 案件分析</div>
+      <h1>先把发生的事说清楚</h1>
+      <p className="setup-lead">不需要填写姓名、身份证号、手机号或详细住址。系统分析后只会集中追问一次。</p>
+      <label className="field full"><span>案情经过</span><textarea rows={9} value={facts} onChange={(event) => setFacts(event.target.value)} placeholder="例如：何时入职、岗位和工资、发生了什么争议、何时离职或解除、仲裁结果和送达情况……" required /></label>
+      <label className="field full"><span>你的诉求</span><textarea rows={5} value={claims} onChange={(event) => setClaims(event.target.value)} placeholder="例如：不服仲裁裁决中的违约金，要求判决无需支付或调低至……" required /></label>
+      <div className="privacy-note"><ShieldCheck size={18} /><span>姓名、证件号码、联系方式等敏感信息将在 Word 中显示为明确的“待填入”项，由你下载后本地填写。</span></div>
+      <label className="consent-check"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} /><span>同意将本次输入文本发送至配置的大模型，并按需向元典发送最小化检索词</span></label>
+      {error && <div className="form-error">{error}</div>}
+      <button className="button button-primary button-large" disabled={loading || !facts.trim() || !claims.trim()}>{loading ? "正在分析案情…" : <><Sparkles size={18} /> 开始分析 <ArrowRight size={18} /></>}</button>
+    </form>
+  </main>;
 }

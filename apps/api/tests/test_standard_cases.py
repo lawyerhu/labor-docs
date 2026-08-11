@@ -34,7 +34,8 @@ def test_release_v1_standard_cases_are_generatable_and_preserve_expected_readine
         if case["variant"] == 9:
             assert assessment.unresolved_conflicts == ["工资支付日期存在两个虚构版本"]
         if case["variant"] == 10:
-            assert "原告名称" in assessment.missing_fields or "申请人名称" in assessment.missing_fields
+            assert "原告名称" not in assessment.missing_fields
+            assert "申请人名称" not in assessment.missing_fields
 
 
 def test_release_v1_standard_cases_generate_the_expected_artifact_set(tmp_path: Path):
@@ -51,9 +52,9 @@ def test_release_v1_standard_cases_generate_the_expected_artifact_set(tmp_path: 
         )
 
         expected = (
-            {"01-劳动人事争议仲裁申请书.docx", "02-证据目录.docx"}
+            {"01-劳动人事争议仲裁申请书.docx", "02-证据目录.pdf"}
             if case["case_stage"] == "arbitration"
-            else {"01A-民事起诉状（要素式）.docx", "01B-民事起诉状（普通式）.docx", "02-证据目录.docx"}
+            else {"01-民事起诉状.docx", "02-证据目录.pdf"}
         )
         assert {artifact.filename for artifact in result.artifacts} == expected
         assert all(artifact.path.exists() for artifact in result.artifacts)

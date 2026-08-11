@@ -30,7 +30,7 @@ def test_user_can_create_incomplete_case_and_generate_formal_documents():
         assert generated.status_code == 200
         body = generated.json()
         assert body["readiness"] == "formal_with_placeholders"
-        assert len(body["artifacts"]) == 3
+        assert {item["filename"] for item in body["artifacts"]} == {"01-民事起诉状.docx", "02-证据目录.pdf"}
 
 
 def test_upload_rejects_executable_renamed_as_pdf():

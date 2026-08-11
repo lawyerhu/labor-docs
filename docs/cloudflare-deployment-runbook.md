@@ -50,7 +50,10 @@ WORKER_INTERNAL_TOKEN=<与 INTERNAL_API_TOKEN 相同>
 BREVO_API_KEY=<Brevo API key>
 BREVO_SENDER_EMAIL=<Brevo 已验证的发件人邮箱>
 BREVO_SENDER_NAME=劳动文书助手
+YUANDIAN_TOKEN=<元典 MCP API key>
 ```
+
+元典法条、案例和企业 MCP 地址已有官方默认值；如网关地址调整，可分别覆盖`YUANDIAN_LAW_MCP_URL`、`YUANDIAN_CASE_MCP_URL`和`YUANDIAN_COMPANY_MCP_URL`。元典不可用时，系统继续生成带`[待核验法律依据]`的正式稿。
 
 验证码邮件通过 Brevo HTTPS API 发送，不再配置 QQ SMTP。Brevo 的发件人邮箱必须先在 Brevo 中完成验证；API 密钥只保存到生成服务的环境变量中。
 

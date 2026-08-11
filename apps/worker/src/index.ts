@@ -137,6 +137,35 @@ async function sendOtpEmail(env: Env, email: string, code: string): Promise<bool
   }
 }
 
+function mergeData(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    result[key] = value && typeof value === "object" && !Array.isArray(value)
+      && result[key] && typeof result[key] === "object" && !Array.isArray(result[key])
+      ? mergeData(result[key] as Record<string, unknown>, value as Record<string, unknown>)
+      : value;
+  }
+  return result;
+}
+
+async function requestCaseAnalysis(env: Env, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+  const generatorUrl = env.GENERATOR_URL?.trim();
+  const token = env.GENERATOR_AUTH_TOKEN?.trim();
+  if (!generatorUrl || !token) return null;
+  try {
+    const response = await fetch(`${generatorUrl.replace(/\/$/, "")}/internal/case-analysis`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) return null;
+    const result = await response.json();
+    return result && typeof result === "object" && !Array.isArray(result) ? result as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
 async function requestAuthCode(request: Request, env: Env): Promise<Response> {
   const secret = env.SESSION_SECRET?.trim();
   if (!secret) return json({ detail: "登录服务尚未配置" }, { status: 503 });
@@ -275,8 +304,6 @@ function valueAt(data: Record<string, unknown>, path: string): unknown {
 function readinessFor(row: CaseRow, data: Record<string, unknown>) {
   const missing: string[] = [];
   const required = [
-    ["parties.initiating.name", "当事人姓名或名称"],
-    ["parties.opposing.name", "对方姓名或名称"],
     ["employment_facts.start_date", "入职日期"],
     ["employment_facts.summary", "基本案情"],
   ] as const;
@@ -369,23 +396,31 @@ async function listCases(request: Request, env: Env): Promise<Response> {
 async function createCase(request: Request, env: Env): Promise<Response> {
   const user = await currentUser(request, env);
   if (!user) return json({ detail: "请先登录" }, { status: 401 });
-  let body: { title?: unknown; case_stage?: unknown; party_side?: unknown };
+  let body: { title?: unknown; case_stage?: unknown; party_side?: unknown; facts?: unknown; claims_text?: unknown };
   try {
     body = await request.json() as typeof body;
   } catch {
     return json({ detail: "请求体必须是 JSON" }, { status: 400 });
   }
-  const title = typeof body.title === "string" ? body.title.trim().slice(0, 200) : "";
-  const stage = body.case_stage === "arbitration" || body.case_stage === "litigation" ? body.case_stage : "";
-  const side = body.party_side === "worker" || body.party_side === "employer" ? body.party_side : "";
-  if (!title || !stage || !side) return json({ detail: "缺少案件名称、阶段或当事人一方" }, { status: 422 });
+  const facts = typeof body.facts === "string" ? body.facts.trim().slice(0, 20000) : "";
+  const claimsText = typeof body.claims_text === "string" ? body.claims_text.trim().slice(0, 10000) : "";
+  if (!facts || !claimsText) return json({ detail: "请填写案情经过和诉求" }, { status: 422 });
+  const combined = `${facts}\n${claimsText}`;
+  const stage = body.case_stage === "arbitration" || body.case_stage === "litigation" ? body.case_stage
+    : /仲裁裁决|不服仲裁|起诉|送达/.test(combined) ? "litigation" : "arbitration";
+  const side = body.party_side === "worker" || body.party_side === "employer" ? body.party_side
+    : /我司|本公司|代表公司|公司起诉|用人单位/.test(combined) ? "employer" : "worker";
+  const title = typeof body.title === "string" && body.title.trim() ? body.title.trim().slice(0, 200) : "劳动争议案件";
 
   const entitlement = await env.DB.prepare("SELECT free_case_used FROM users WHERE id = ?").bind(user.id).first<{ free_case_used: number }>();
   const accessStatus = Number(entitlement?.free_case_used ?? 0) === 0 ? "free" : "locked";
   const now = new Date().toISOString();
   const row: CaseRow = {
     id: crypto.randomUUID(), user_id: user.id, title, case_stage: stage, party_side: side,
-    status: "draft", access_status: accessStatus, data_json: JSON.stringify({ conversation: [] }),
+    status: "draft", access_status: accessStatus, data_json: JSON.stringify({
+      intake: { facts, claims_text: claimsText },
+      conversation: [{ role: "user", content: `案情：${facts}\n诉求：${claimsText}` }],
+    }),
     generation_count: 0, generation_version: "rules-1.0/templates-1.0", created_at: now,
     expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
   };
@@ -420,20 +455,41 @@ async function chatCase(request: Request, env: Env, caseId: string): Promise<Res
   if (owned instanceof Response) return owned;
   let body: { message?: unknown; consent_cloud_processing?: unknown };
   try { body = await request.json() as typeof body; } catch { return json({ detail: "请求体必须是 JSON" }, { status: 400 }); }
-  const message = typeof body.message === "string" ? body.message.trim().slice(0, 10000) : "";
-  if (!message) return json({ detail: "请输入案情" }, { status: 422 });
+  const message = typeof body.message === "string" ? body.message.trim().slice(0, 20000) : "";
+  if (!message) return json({ detail: "请输入补充内容" }, { status: 422 });
+  if (body.consent_cloud_processing !== true) return json({ detail: "请先同意将案情文本发送至大模型和元典进行本次分析" }, { status: 422 });
   const data = parseCaseData(owned.row.data_json);
+  const intake = data.intake && typeof data.intake === "object" ? data.intake as Record<string, unknown> : {};
+  const priorAnalysis = data.analysis && typeof data.analysis === "object" ? data.analysis as Record<string, unknown> : {};
+  if (priorAnalysis.round === 2) return json({ detail: "案件分析已经完成，可以直接上传证据并生成材料" }, { status: 409 });
+  const round = priorAnalysis.round === 1 ? 2 : 1;
   const conversation = Array.isArray(data.conversation) ? [...data.conversation] : [];
-  conversation.push({ role: "user", content: message });
-  const assessment = readinessFor(owned.row, data);
-  const reply = assessment.missing_fields.length
-    ? `已记录。下一项可以补充：${assessment.missing_fields[0]}。如果暂时不知道，也可以继续描述其他情况。`
-    : "已记录案情。你可以在信息确认页核对内容，也可以直接准备生成正式稿。";
+  if (round === 2) conversation.push({ role: "user", content: message });
+  const analysis = await requestCaseAnalysis(env, {
+    facts: String(intake.facts || message),
+    claims_text: String(intake.claims_text || "[待分析诉求]"),
+    supplement: round === 2 ? message : "",
+    current_data: data,
+    round,
+  });
+  if (!analysis) return json({ detail: "案件分析服务暂时不可用，请稍后重试" }, { status: 502 });
+  const patch = analysis.data_patch && typeof analysis.data_patch === "object" && !Array.isArray(analysis.data_patch)
+    ? analysis.data_patch as Record<string, unknown> : {};
+  const merged = mergeData(data, patch);
+  const questions = Array.isArray(analysis.follow_up_questions) ? analysis.follow_up_questions.map(String) : [];
+  const reply = round === 1 && questions.length
+    ? `分析完成。请一次性补充以下信息：\n${questions.map((item, index) => `${index + 1}. ${item}`).join("\n")}`
+    : "补充信息已合并。现在可以上传现有证据并直接生成文书。";
   conversation.push({ role: "assistant", content: reply });
-  data.conversation = conversation;
-  await env.DB.prepare("UPDATE cases SET data_json = ?, status = 'pending_confirmation' WHERE id = ? AND user_id = ?")
-    .bind(JSON.stringify(data), caseId, owned.user.id).run();
-  return json({ data, reply, readiness: assessment.readiness, missing_fields: assessment.missing_fields });
+  merged.conversation = conversation;
+  merged.analysis = { ...analysis, round };
+  const stage = analysis.case_stage === "arbitration" || analysis.case_stage === "litigation" ? analysis.case_stage : owned.row.case_stage;
+  const side = analysis.party_side === "worker" || analysis.party_side === "employer" ? analysis.party_side : owned.row.party_side;
+  await env.DB.prepare("UPDATE cases SET data_json = ?, case_stage = ?, party_side = ?, status = ? WHERE id = ? AND user_id = ?")
+    .bind(JSON.stringify(merged), stage, side, round === 1 ? "pending_confirmation" : "ready_to_generate", caseId, owned.user.id).run();
+  const updatedRow = { ...owned.row, data_json: JSON.stringify(merged), case_stage: stage, party_side: side };
+  const assessment = readinessFor(updatedRow, merged);
+  return json({ data: merged, reply, readiness: assessment.readiness, missing_fields: assessment.missing_fields });
 }
 
 function safeFilename(value: string): string {
@@ -755,7 +811,12 @@ async function dispatchGeneration(message: Message<GenerationMessage>, env: Env)
   }
 
   if (!response.ok) {
-    const detail = (await response.text()).slice(0, 1500);
+    const body = (await response.text()).slice(0, 1500);
+    let detail = body;
+    try {
+      const parsed = JSON.parse(body) as { detail?: unknown };
+      if (typeof parsed.detail === "string") detail = parsed.detail;
+    } catch { /* keep the safe response body */ }
     await env.DB.prepare(
       "UPDATE generation_jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
     )

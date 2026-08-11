@@ -20,6 +20,12 @@ from pypdf import PdfReader, PdfWriter
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfgen import canvas
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from app.config import get_settings
 from app.domain.calculations import calculate_claim
@@ -407,20 +413,19 @@ def _assemble_evidence(evidence: list[dict[str, Any]], path: Path) -> list[str]:
 
 
 def _build_catalog(path: Path, evidence: list[dict[str, Any]], page_ranges: list[str]) -> None:
-    document = Document()
-    _configure_document(document, landscape=True)
-    _title(document, "证据目录")
-    table = document.add_table(rows=1 + len(evidence), cols=5)
-    table.style = "Table Grid"
+    try:
+        pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    except KeyError:
+        pass
+    document = SimpleDocTemplate(
+        str(path), pagesize=landscape(A4), leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+        topMargin=1.5 * cm, bottomMargin=1.5 * cm, title="证据目录",
+    )
+    normal = ParagraphStyle("catalog", fontName="STSong-Light", fontSize=9, leading=13)
+    centered = ParagraphStyle("catalog-center", parent=normal, alignment=TA_CENTER)
+    title = ParagraphStyle("catalog-title", parent=centered, fontSize=18, leading=24, spaceAfter=12)
     headers = ["证据编号", "证据名称", "来源", "证明目的", "页码"]
-    widths = [2.2, 5.0, 4.2, 11.5, 2.5]
-    _set_table_geometry(table, widths)
-    for index, header in enumerate(headers):
-        _set_cell(table.cell(0, index), header, bold=True, center=True)
-        table.cell(0, index).width = Cm(widths[index])
-        shading = OxmlElement("w:shd")
-        shading.set(qn("w:fill"), "E8EEF6")
-        table.cell(0, index)._tc.get_or_add_tcPr().append(shading)
+    rows: list[list[Any]] = [[Paragraph(value, centered) for value in headers]]
     for row_index, item in enumerate(evidence, start=1):
         values = [
             str(row_index),
@@ -429,11 +434,19 @@ def _build_catalog(path: Path, evidence: list[dict[str, Any]], page_ranges: list
             item.get("purpose") or "[待填入：证明目的]",
             page_ranges[row_index - 1],
         ]
-        for column, value in enumerate(values):
-            _set_cell(table.cell(row_index, column), str(value), center=column in {0, 4})
-            table.cell(row_index, column).width = Cm(widths[column])
-    document.core_properties.title = "证据目录"
-    document.save(path)
+        rows.append([Paragraph(str(value), centered if index in {0, 4} else normal) for index, value in enumerate(values)])
+    table = Table(rows, colWidths=[2.2 * cm, 5 * cm, 4.2 * cm, 11.5 * cm, 2.5 * cm], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), "STSong-Light"),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF6")),
+        ("GRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#64748B")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    document.build([Paragraph("证据目录", title), Spacer(1, 4), table])
 
 
 def build_case_package(
@@ -455,19 +468,15 @@ def build_case_package(
         _build_arbitration(target, payload)
         artifacts.append(GeneratedArtifact("pleading", target.name, target))
     else:
-        element = case_dir / "01A-民事起诉状（要素式）.docx"
-        ordinary = case_dir / "01B-民事起诉状（普通式）.docx"
-        _build_element_complaint(element, payload)
+        ordinary = case_dir / "01-民事起诉状.docx"
         _build_ordinary_complaint(ordinary, payload)
-        artifacts.extend(
-            [GeneratedArtifact("pleading_element", element.name, element), GeneratedArtifact("pleading_ordinary", ordinary.name, ordinary)]
-        )
+        artifacts.append(GeneratedArtifact("pleading", ordinary.name, ordinary))
 
     page_ranges: list[str] = []
     if evidence_items:
         evidence_path = case_dir / "03-证据材料.pdf"
         page_ranges = _assemble_evidence(evidence_items, evidence_path)
-    catalog = case_dir / "02-证据目录.docx"
+    catalog = case_dir / "02-证据目录.pdf"
     _build_catalog(catalog, evidence_items, page_ranges)
     artifacts.append(GeneratedArtifact("evidence_catalog", catalog.name, catalog))
     if evidence_items:

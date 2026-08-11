@@ -24,6 +24,7 @@ from app.schemas import (
     ClaimCalculationInput,
     CreateCaseInput,
     InternalGenerationJobInput,
+    InternalCaseAnalysisInput,
     InternalOtpInput,
     LegalSearchInput,
     RedeemInput,
@@ -33,6 +34,7 @@ from app.schemas import (
     VerifyCodeInput,
 )
 from app.services.email import send_otp_email
+from app.services.case_analysis import CaseAnalyzer
 from app.services.generation import run_generation
 from app.services.llm import OpenAICompatibleExtractor, deep_merge
 from app.services.legal_research import YuandianLegalResearchProvider
@@ -168,11 +170,27 @@ def create_app() -> FastAPI:
             result = run_remote_generation(worker_payload)
         except RemoteGenerationError as exc:
             logger.exception("[GENERATION-ERROR] bridge failure")
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, "生成服务桥接失败") from exc
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"生成服务桥接失败：{exc}") from exc
         except Exception as exc:
             logger.exception("[GENERATION-ERROR] document generation failure")
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "文书生成失败") from exc
         return {"status": "completed", "job_id": payload.job_id, "case_id": payload.case_id, "result": result}
+
+    @app.post("/internal/case-analysis", include_in_schema=False)
+    async def internal_case_analysis(
+        payload: InternalCaseAnalysisInput,
+        authorization: str | None = Header(default=None),
+    ):
+        expected = settings.generator_internal_token
+        if not expected or not secrets.compare_digest(authorization or "", f"Bearer {expected}"):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未授权")
+        return await CaseAnalyzer().analyze(
+            facts=payload.facts,
+            claims_text=payload.claims_text,
+            supplement=payload.supplement,
+            current_data=payload.current_data,
+            round_number=payload.round,
+        )
 
     @app.post("/internal/auth/send-otp", include_in_schema=False)
     def internal_send_otp(

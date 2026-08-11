@@ -32,22 +32,12 @@ def assess_readiness(payload: dict[str, Any]) -> ReadinessAssessment:
         if not payload.get(key):
             missing.append(label)
 
+    # 姓名、证件号码、联系方式和详细住址不在网站收集，统一留在 Word 中由用户本地补写。
     required = {
-        "parties.initiating.name": "原告名称" if stage == "litigation" else "申请人名称",
-        "parties.initiating.address": "原告住所地" if stage == "litigation" else "申请人住所地",
-        "parties.initiating.contact": "原告联系方式" if stage == "litigation" else "申请人联系方式",
-        "parties.opposing.name": "被告名称" if stage == "litigation" else "被申请人名称",
-        "parties.opposing.address": "被告住所地" if stage == "litigation" else "被申请人住所地",
         "employment_facts.start_date": "入职日期",
         "employment_facts.position": "工作岗位",
         "employment_facts.summary": "基本案情",
     }
-    if side == "worker":
-        required["parties.initiating.id_number"] = "劳动者身份证号码"
-        required["parties.opposing.credit_code"] = "用人单位统一社会信用代码"
-    elif side == "employer":
-        required["parties.initiating.credit_code"] = "用人单位统一社会信用代码"
-        required["parties.opposing.id_number"] = "劳动者身份证号码"
 
     if stage == "arbitration":
         required["arbitration.committee"] = "劳动人事争议仲裁委员会"
@@ -83,4 +73,3 @@ def assess_readiness(payload: dict[str, Any]) -> ReadinessAssessment:
     evidence_gaps = [str(item) for item in data.get("evidence_gaps", []) if item]
     readiness = "formal_complete" if not missing and not conflicts and not unverified else "formal_with_placeholders"
     return ReadinessAssessment(readiness, bool(stage and side), missing, conflicts, unverified, evidence_gaps)
-

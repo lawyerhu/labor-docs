@@ -8,7 +8,8 @@ def test_incomplete_litigation_case_is_still_formally_generatable():
     result = assess_readiness({"case_stage": "litigation", "party_side": "employer", "data": {}})
 
     assert result.readiness == "formal_with_placeholders"
-    assert "原告名称" in result.missing_fields
+    assert "原告名称" not in result.missing_fields
+    assert "入职日期" in result.missing_fields
     assert "仲裁裁决送达日期" in result.missing_fields
     assert result.can_generate is True
 

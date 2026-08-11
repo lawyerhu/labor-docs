@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 from PIL import Image
 from docx import Document
-from docx.enum.section import WD_ORIENT
 from pypdf import PdfReader
 from reportlab.pdfgen import canvas
 
@@ -34,19 +33,13 @@ def test_litigation_package_with_missing_facts_contains_placeholders(tmp_path: P
     )
 
     names = {artifact.filename for artifact in result.artifacts}
-    assert names == {
-        "01A-民事起诉状（要素式）.docx",
-        "01B-民事起诉状（普通式）.docx",
-        "02-证据目录.docx",
-    }
+    assert names == {"01-民事起诉状.docx", "02-证据目录.pdf"}
     assert "03-证据材料.pdf" not in names
-    ordinary = tmp_path / "case-empty" / "01B-民事起诉状（普通式）.docx"
+    ordinary = tmp_path / "case-empty" / "01-民事起诉状.docx"
     assert "[待填入：原告名称]" in _all_text(ordinary)
-
-    catalog = Document(tmp_path / "case-empty" / "02-证据目录.docx")
-    assert catalog.sections[0].orientation == WD_ORIENT.LANDSCAPE
-    assert [cell.text for cell in catalog.tables[0].rows[0].cells] == ["证据编号", "证据名称", "来源", "证明目的", "页码"]
-    assert len(catalog.tables[0].rows) == 1
+    catalog = PdfReader(tmp_path / "case-empty" / "02-证据目录.pdf")
+    assert len(catalog.pages) == 1
+    assert float(catalog.pages[0].mediabox.width) > float(catalog.pages[0].mediabox.height)
 
 
 def test_evidence_package_uses_actual_files_and_continuous_pages(tmp_path: Path):
@@ -70,9 +63,9 @@ def test_evidence_package_uses_actual_files_and_continuous_pages(tmp_path: Path)
     reader = PdfReader(evidence)
     assert len(reader.pages) == 3
     assert len(reader.outline) == 2
-    catalog_text = _all_text(tmp_path / "case-evidence" / "02-证据目录.docx")
-    assert "1—2" in catalog_text
-    assert "3" in catalog_text
+    catalog = PdfReader(tmp_path / "case-evidence" / "02-证据目录.pdf")
+    assert len(catalog.pages) == 1
+    assert float(catalog.pages[0].mediabox.width) > float(catalog.pages[0].mediabox.height)
     assert result.readiness == "formal_with_placeholders"
 
 
