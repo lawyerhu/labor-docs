@@ -34,12 +34,9 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     soffice_path: str | None = None
     antivirus_required: bool = False
-    smtp_host: str | None = None
-    smtp_port: int = 465
-    smtp_username: str | None = None
-    smtp_password: str | None = None
-    smtp_from: str | None = None
-    smtp_use_ssl: bool = True
+    brevo_api_key: str | None = None
+    brevo_sender_email: str | None = None
+    brevo_sender_name: str = "劳动文书助手"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

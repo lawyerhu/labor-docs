@@ -13,7 +13,7 @@
 	},
 	"vars": {
 		"ENVIRONMENT": "production",
-		"GENERATOR_URL": ""
+		"GENERATOR_URL": "https://labor-docs-generator.onrender.com"
 	},
 	"d1_databases": [
 		{

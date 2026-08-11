@@ -47,7 +47,12 @@ S3_REGION=auto
 GENERATOR_INTERNAL_TOKEN=<与 GENERATOR_AUTH_TOKEN 相同>
 WORKER_INTERNAL_URL=https://<worker-host>
 WORKER_INTERNAL_TOKEN=<与 INTERNAL_API_TOKEN 相同>
+BREVO_API_KEY=<Brevo API key>
+BREVO_SENDER_EMAIL=<Brevo 已验证的发件人邮箱>
+BREVO_SENDER_NAME=劳动文书助手
 ```
+
+验证码邮件通过 Brevo HTTPS API 发送，不再配置 QQ SMTP。Brevo 的发件人邮箱必须先在 Brevo 中完成验证；API 密钥只保存到生成服务的环境变量中。
 
 先用预发布 Worker 完成“上传实际材料 → Queue → FastAPI 生成 → R2 文书 → D1 元数据 → 下载”闭环，再切换前端 API 地址。
 
