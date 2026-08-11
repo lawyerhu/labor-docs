@@ -481,9 +481,11 @@ async function chatCase(request: Request, env: Env, caseId: string): Promise<Res
     : "补充信息已合并。现在可以上传现有证据并直接生成文书。";
   conversation.push({ role: "assistant", content: reply });
   merged.conversation = conversation;
-  merged.analysis = { ...analysis, round };
-  const stage = analysis.case_stage === "arbitration" || analysis.case_stage === "litigation" ? analysis.case_stage : owned.row.case_stage;
-  const side = analysis.party_side === "worker" || analysis.party_side === "employer" ? analysis.party_side : owned.row.party_side;
+  // The user-selected routing fields are authoritative. The analysis model may
+  // describe a conflicting stage or side, but must never reroute the case.
+  const stage = owned.row.case_stage;
+  const side = owned.row.party_side;
+  merged.analysis = { ...analysis, case_stage: stage, party_side: side, round };
   await env.DB.prepare("UPDATE cases SET data_json = ?, case_stage = ?, party_side = ?, status = ? WHERE id = ? AND user_id = ?")
     .bind(JSON.stringify(merged), stage, side, round === 1 ? "pending_confirmation" : "ready_to_generate", caseId, owned.user.id).run();
   const updatedRow = { ...owned.row, data_json: JSON.stringify(merged), case_stage: stage, party_side: side };
