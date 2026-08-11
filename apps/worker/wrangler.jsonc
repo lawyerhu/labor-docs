@@ -1,0 +1,88 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "labor-docs-api",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-11",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"triggers": {
+		"crons": [
+			"0 * * * *"
+		]
+	},
+	"vars": {
+		"ENVIRONMENT": "production",
+		"GENERATOR_URL": ""
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "labor-docs",
+			"database_id": "8106ce65-f2f8-436a-a9db-dfe4cb8326e6",
+			"migrations_dir": "migrations"
+		},
+	],
+	"r2_buckets": [
+		{
+			"binding": "FILES",
+			"bucket_name": "labor-docs-files",
+			"preview_bucket_name": "labor-docs-files-preview"
+		}
+	],
+	"queues": {
+		"producers": [
+			{
+				"binding": "GENERATION_QUEUE",
+				"queue": "labor-docs-generation"
+			}
+		],
+		"consumers": [
+			{
+				"queue": "labor-docs-generation",
+				"max_batch_size": 10,
+				"max_batch_timeout": 5,
+				"max_retries": 3
+			}
+		]
+	},
+	"env": {
+		"local": {
+			"vars": {
+				"ENVIRONMENT": "local",
+				"GENERATOR_URL": "http://127.0.0.1:8000"
+			},
+			"d1_databases": [
+				{
+					"binding": "DB",
+					"database_name": "labor-docs",
+					"database_id": "00000000-0000-0000-0000-000000000000",
+					"migrations_dir": "migrations"
+				}
+			],
+			"r2_buckets": [
+				{
+					"binding": "FILES",
+					"bucket_name": "labor-docs-files",
+					"preview_bucket_name": "labor-docs-files-preview"
+				}
+			],
+			"queues": {
+				"producers": [
+					{
+						"binding": "GENERATION_QUEUE",
+						"queue": "labor-docs-generation"
+					}
+				],
+				"consumers": [
+					{
+						"queue": "labor-docs-generation",
+						"max_batch_size": 10,
+						"max_batch_timeout": 5,
+						"max_retries": 3
+					}
+				]
+			}
+		}
+	}
+}

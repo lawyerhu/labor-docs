@@ -1,0 +1,93 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: labor_docs
+      POSTGRES_USER: labor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U labor -d labor_docs"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+
+  api:
+    build: ./apps/api
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://labor:${POSTGRES_PASSWORD:-change-me}@postgres:5432/labor_docs
+      REDIS_URL: redis://redis:6379/0
+      LOCAL_STORAGE_DIR: /data/storage
+      FRONTEND_ORIGIN: ${SITE_ADDRESS:-http://localhost}
+    volumes:
+      - case-storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build: ./apps/api
+    command: celery -A app.tasks.celery_app worker --loglevel=INFO
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://labor:${POSTGRES_PASSWORD:-change-me}@postgres:5432/labor_docs
+      REDIS_URL: redis://redis:6379/0
+      LOCAL_STORAGE_DIR: /data/storage
+    volumes:
+      - case-storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  beat:
+    build: ./apps/api
+    command: celery -A app.tasks.celery_app beat --loglevel=INFO
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://labor:${POSTGRES_PASSWORD:-change-me}@postgres:5432/labor_docs
+      REDIS_URL: redis://redis:6379/0
+      LOCAL_STORAGE_DIR: /data/storage
+    depends_on:
+      - worker
+
+  web:
+    build: ./apps/web
+    environment:
+      API_INTERNAL_URL: http://api:8000
+    depends_on:
+      - api
+
+  caddy:
+    image: caddy:2.8-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-http://localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - web
+      - api
+
+volumes:
+  postgres-data:
+  redis-data:
+  case-storage:
+  caddy-data:
+  caddy-config:
+

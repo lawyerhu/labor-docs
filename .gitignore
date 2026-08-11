@@ -1,0 +1,18 @@
+.env
+.env.local
+.dev.vars
+.dev.vars.*
+node_modules/
+.wrangler/
+.next/
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
+.pytest_cache/
+*.db
+storage/
+test-storage/
+coverage/
+*.log
+
+# Existing case work and delivered documents are intentionally not touched.

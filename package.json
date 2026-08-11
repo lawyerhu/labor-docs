@@ -1,0 +1,11 @@
+{
+  "name": "labor-docs-platform",
+  "private": true,
+  "scripts": {
+    "dev:web": "npm --prefix apps/web run dev",
+    "build:web": "npm --prefix apps/web run build",
+    "dev:worker": "npm --prefix apps/worker run dev",
+    "typecheck:worker": "npm --prefix apps/worker run typecheck",
+    "test:api": "python -m pytest apps/api/tests"
+  }
+}
