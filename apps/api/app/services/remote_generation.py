@@ -74,6 +74,7 @@ def run_remote_generation(worker_payload: dict[str, Any]) -> dict[str, Any]:
 
     evidence_items: list[dict[str, Any]] = []
     processing_paths: list[Path] = []
+    stage = "validate"
     try:
         for item in worker_payload.get("evidence") or []:
             if not isinstance(item, dict) or item.get("status") != "ready":
@@ -81,6 +82,7 @@ def run_remote_generation(worker_payload: dict[str, Any]) -> dict[str, Any]:
             evidence_id = str(item.get("id") or "")
             if not evidence_id:
                 raise RemoteGenerationError("证据编号无效")
+            stage = f"download evidence {evidence_id}"
             stored_path = _s3_stored_path(str(item.get("object_key") or ""))
             processing_path = materialize_for_processing(stored_path, case_id, evidence_id)
             processing_paths.append(processing_path)
@@ -94,6 +96,7 @@ def run_remote_generation(worker_payload: dict[str, Any]) -> dict[str, Any]:
                     "stored_path": str(processing_path),
                 }
             )
+        stage = "build package"
         result = build_case_package(
             case_id=case_id,
             payload={"case_stage": case_stage, "party_side": party_side, "data": case.get("data") or {}},
@@ -102,6 +105,7 @@ def run_remote_generation(worker_payload: dict[str, Any]) -> dict[str, Any]:
         )
         artifacts = []
         for generated in result.artifacts:
+            stage = f"upload artifact {generated.kind}"
             stored_path = persist_artifact(case_id, generated.path)
             artifacts.append(
                 {
@@ -110,9 +114,12 @@ def run_remote_generation(worker_payload: dict[str, Any]) -> dict[str, Any]:
                     "object_key": _s3_object_key(stored_path),
                 }
             )
-    except Exception:
+    except RemoteGenerationError:
         _cleanup_generated_case(settings, case_id)
         raise
+    except Exception as exc:
+        _cleanup_generated_case(settings, case_id)
+        raise RemoteGenerationError(f"{stage} failed: {type(exc).__name__}") from exc
     finally:
         for processing_path in processing_paths:
             delete_if_managed(str(processing_path))

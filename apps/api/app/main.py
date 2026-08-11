@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -37,6 +38,9 @@ from app.services.llm import OpenAICompatibleExtractor, deep_merge
 from app.services.legal_research import YuandianLegalResearchProvider
 from app.services.remote_generation import RemoteGenerationError, fetch_worker_generation_input, run_remote_generation
 from app.services.storage import delete_if_managed, presigned_download, save_upload
+
+
+logger = logging.getLogger(__name__)
 
 
 def _aware(value: datetime) -> datetime:
@@ -163,8 +167,10 @@ def create_app() -> FastAPI:
                 raise RemoteGenerationError("Worker返回的案件编号不一致")
             result = run_remote_generation(worker_payload)
         except RemoteGenerationError as exc:
+            logger.exception("[GENERATION-ERROR] bridge failure")
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, "生成服务桥接失败") from exc
         except Exception as exc:
+            logger.exception("[GENERATION-ERROR] document generation failure")
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "文书生成失败") from exc
         return {"status": "completed", "job_id": payload.job_id, "case_id": payload.case_id, "result": result}
 
