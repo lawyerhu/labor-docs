@@ -23,6 +23,7 @@ from app.schemas import (
     ClaimCalculationInput,
     CreateCaseInput,
     InternalGenerationJobInput,
+    InternalOtpInput,
     LegalSearchInput,
     RedeemInput,
     RequestCodeInput,
@@ -166,6 +167,17 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "文书生成失败") from exc
         return {"status": "completed", "job_id": payload.job_id, "case_id": payload.case_id, "result": result}
+
+    @app.post("/internal/auth/send-otp", include_in_schema=False)
+    def internal_send_otp(
+        payload: InternalOtpInput,
+        authorization: str | None = Header(default=None),
+    ):
+        expected = settings.generator_internal_token
+        if not expected or not secrets.compare_digest(authorization or "", f"Bearer {expected}"):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未授权")
+        send_otp_email(str(payload.email), payload.code)
+        return {"status": "sent"}
 
     @app.post("/api/auth/request-code")
     def request_code(payload: RequestCodeInput, db: Session = Depends(get_db)):

@@ -13,6 +13,203 @@ interface Env {
   GENERATOR_URL?: string;
   GENERATOR_AUTH_TOKEN?: string;
   INTERNAL_API_TOKEN?: string;
+  SESSION_SECRET?: string;
+}
+
+const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
+
+type PublicUser = { id: string; email: string };
+
+function bytesToHex(bytes: Uint8Array): string {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlToBytes(value: string): Uint8Array {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function importHmacKey(secret: string): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign", "verify"],
+  );
+}
+
+async function hmacHex(secret: string, value: string): Promise<string> {
+  const key = await importHmacKey(secret);
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value));
+  return bytesToHex(new Uint8Array(signature));
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
+function normalizeEmail(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const email = value.trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
+}
+
+function sessionCookie(token: string, maxAge = SESSION_MAX_AGE_SECONDS): string {
+  return `labor_session=${token}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Lax`;
+}
+
+async function createSessionToken(secret: string, user: PublicUser): Promise<string> {
+  const payload = bytesToBase64Url(new TextEncoder().encode(JSON.stringify({
+    uid: user.id,
+    email: user.email,
+    exp: Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SECONDS,
+  })));
+  const key = await importHmacKey(secret);
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+  return `${payload}.${bytesToBase64Url(new Uint8Array(signature))}`;
+}
+
+async function readSessionToken(token: string, secret: string): Promise<PublicUser | null> {
+  const [payload, encodedSignature] = token.split(".");
+  if (!payload || !encodedSignature) return null;
+  try {
+    const decoded = JSON.parse(new TextDecoder().decode(base64UrlToBytes(payload))) as { uid?: string; email?: string; exp?: number };
+    if (!decoded.uid || !decoded.email || !decoded.exp || decoded.exp <= Math.floor(Date.now() / 1000)) return null;
+    const key = await importHmacKey(secret);
+    const signature = new Uint8Array(base64UrlToBytes(encodedSignature)).buffer as ArrayBuffer;
+    const valid = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      signature,
+      new TextEncoder().encode(payload),
+    );
+    return valid ? { id: decoded.uid, email: decoded.email } : null;
+  } catch {
+    return null;
+  }
+}
+
+function requestCookie(request: Request, name: string): string | null {
+  const cookies = request.headers.get("Cookie") ?? "";
+  const match = cookies.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return match?.[1] ?? null;
+}
+
+async function currentUser(request: Request, env: Env): Promise<PublicUser | null> {
+  const secret = env.SESSION_SECRET?.trim();
+  const token = requestCookie(request, "labor_session");
+  if (!secret || !token) return null;
+  const session = await readSessionToken(token, secret);
+  if (!session) return null;
+  const user = await env.DB.prepare("SELECT id, email FROM users WHERE id = ?").bind(session.id).first<PublicUser>();
+  return user ?? null;
+}
+
+async function sendOtpEmail(env: Env, email: string, code: string): Promise<boolean> {
+  const generatorUrl = env.GENERATOR_URL?.trim();
+  const generatorToken = env.GENERATOR_AUTH_TOKEN?.trim();
+  if (!generatorUrl || !generatorToken) return false;
+  try {
+    const response = await fetch(`${generatorUrl.replace(/\/$/, "")}/internal/auth/send-otp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${generatorToken}`,
+      },
+      body: JSON.stringify({ email, code }),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function requestAuthCode(request: Request, env: Env): Promise<Response> {
+  const secret = env.SESSION_SECRET?.trim();
+  if (!secret) return json({ detail: "登录服务尚未配置" }, { status: 503 });
+  let body: { email?: unknown };
+  try {
+    body = (await request.json()) as { email?: unknown };
+  } catch {
+    return json({ detail: "请求体必须是 JSON" }, { status: 400 });
+  }
+  const email = normalizeEmail(body.email);
+  if (!email) return json({ detail: "请输入有效的邮箱地址" }, { status: 422 });
+
+  const windowStart = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  const recent = await env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM otp_codes WHERE email = ? AND created_at >= ?",
+  ).bind(email, windowStart).first<{ count: number | string }>();
+  if (Number(recent?.count ?? 0) >= 5) {
+    return json({ detail: "验证码请求过于频繁，请 15 分钟后重试" }, { status: 429 });
+  }
+
+  const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0");
+  const now = new Date().toISOString();
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    "INSERT INTO otp_codes (id, email, code_hash, expires_at, attempts, created_at) VALUES (?, ?, ?, ?, 0, ?)",
+  ).bind(id, email, await hmacHex(secret, `otp:${email}:${code}`), new Date(Date.now() + 10 * 60 * 1000).toISOString(), now).run();
+
+  if (env.ENVIRONMENT === "local") return json({ message: "验证码已生成", dev_code: code });
+  if (!(await sendOtpEmail(env, email, code))) {
+    await env.DB.prepare("DELETE FROM otp_codes WHERE id = ?").bind(id).run();
+    return json({ detail: "验证码邮件服务暂未配置或发送失败" }, { status: 503 });
+  }
+  return json({ message: "验证码已发送，有效期 10 分钟" });
+}
+
+async function verifyAuthCode(request: Request, env: Env): Promise<Response> {
+  const secret = env.SESSION_SECRET?.trim();
+  if (!secret) return json({ detail: "登录服务尚未配置" }, { status: 503 });
+  let body: { email?: unknown; code?: unknown };
+  try {
+    body = (await request.json()) as { email?: unknown; code?: unknown };
+  } catch {
+    return json({ detail: "请求体必须是 JSON" }, { status: 400 });
+  }
+  const email = normalizeEmail(body.email);
+  const code = typeof body.code === "string" ? body.code.trim() : "";
+  if (!email || !/^\d{6}$/.test(code)) return json({ detail: "邮箱或验证码格式不正确" }, { status: 400 });
+
+  const record = await env.DB.prepare(
+    "SELECT id, email, code_hash, expires_at, attempts FROM otp_codes WHERE email = ? AND consumed_at IS NULL ORDER BY expires_at DESC LIMIT 1",
+  ).bind(email).first<{ id: string; email: string; code_hash: string; expires_at: string; attempts: number }>();
+  if (!record || new Date(record.expires_at).getTime() <= Date.now()) {
+    return json({ detail: "验证码无效或已过期" }, { status: 400 });
+  }
+  if (record.attempts >= 5) return json({ detail: "验证码尝试次数过多，请重新获取" }, { status: 429 });
+
+  const attempts = record.attempts + 1;
+  await env.DB.prepare("UPDATE otp_codes SET attempts = ? WHERE id = ?").bind(attempts, record.id).run();
+  const expectedHash = await hmacHex(secret, `otp:${email}:${code}`);
+  if (!constantTimeEqual(record.code_hash, expectedHash)) {
+    return json({ detail: attempts >= 5 ? "验证码尝试次数过多，请重新获取" : "验证码无效或已过期" }, { status: attempts >= 5 ? 429 : 400 });
+  }
+
+  const now = new Date().toISOString();
+  await env.DB.prepare("UPDATE otp_codes SET consumed_at = ? WHERE id = ?").bind(now, record.id).run();
+  let user = await env.DB.prepare("SELECT id, email FROM users WHERE email = ?").bind(email).first<PublicUser>();
+  if (!user) {
+    const id = crypto.randomUUID();
+    await env.DB.prepare("INSERT INTO users (id, email, created_at) VALUES (?, ?, ?)").bind(id, email, now).run();
+    user = { id, email };
+  }
+  const token = await createSessionToken(secret, user);
+  return json(user, { headers: { "Set-Cookie": sessionCookie(token) } });
 }
 
 function json(data: unknown, init: ResponseInit = {}): Response {
@@ -354,6 +551,26 @@ export default {
       } catch {
         return json({ status: "degraded", database: "unavailable", environment: env.ENVIRONMENT }, { status: 503 });
       }
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/auth/request-code") {
+      return requestAuthCode(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/auth/verify") {
+      return verifyAuthCode(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/auth/logout") {
+      return new Response(null, {
+        status: 204,
+        headers: { "Set-Cookie": sessionCookie("", 0) },
+      });
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/auth/me") {
+      const user = await currentUser(request, env);
+      return user ? json(user) : json({ detail: "请先登录" }, { status: 401 });
     }
 
     if (request.method === "POST" && url.pathname === "/api/internal/generation-jobs") {

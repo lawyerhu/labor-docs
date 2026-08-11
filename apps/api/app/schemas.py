@@ -56,6 +56,11 @@ class InternalGenerationJobInput(BaseModel):
     case_id: str = Field(min_length=1, max_length=100)
 
 
+class InternalOtpInput(BaseModel):
+    email: EmailStr
+    code: str = Field(pattern=r"^\d{6}$")
+
+
 class ExtractionPatch(BaseModel):
     """Only these case-data keys may be returned by a configured language model."""
 
