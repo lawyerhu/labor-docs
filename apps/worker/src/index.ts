@@ -405,11 +405,10 @@ async function createCase(request: Request, env: Env): Promise<Response> {
   const facts = typeof body.facts === "string" ? body.facts.trim().slice(0, 20000) : "";
   const claimsText = typeof body.claims_text === "string" ? body.claims_text.trim().slice(0, 10000) : "";
   if (!facts || !claimsText) return json({ detail: "请填写案情经过和诉求" }, { status: 422 });
-  const combined = `${facts}\n${claimsText}`;
-  const stage = body.case_stage === "arbitration" || body.case_stage === "litigation" ? body.case_stage
-    : /仲裁裁决|不服仲裁|起诉|送达/.test(combined) ? "litigation" : "arbitration";
-  const side = body.party_side === "worker" || body.party_side === "employer" ? body.party_side
-    : /我司|本公司|代表公司|公司起诉|用人单位/.test(combined) ? "employer" : "worker";
+  if (body.case_stage !== "arbitration" && body.case_stage !== "litigation") return json({ detail: "请选择当前案件阶段" }, { status: 422 });
+  if (body.party_side !== "worker" && body.party_side !== "employer") return json({ detail: "请选择申请人/原告一方" }, { status: 422 });
+  const stage = body.case_stage;
+  const side = body.party_side;
   const title = typeof body.title === "string" && body.title.trim() ? body.title.trim().slice(0, 200) : "劳动争议案件";
 
   const entitlement = await env.DB.prepare("SELECT free_case_used FROM users WHERE id = ?").bind(user.id).first<{ free_case_used: number }>();

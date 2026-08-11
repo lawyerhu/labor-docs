@@ -55,6 +55,8 @@ YUANDIAN_TOKEN=<元典 MCP API key>
 
 元典法条、案例和企业 MCP 地址已有官方默认值；如网关地址调整，可分别覆盖`YUANDIAN_LAW_MCP_URL`、`YUANDIAN_CASE_MCP_URL`和`YUANDIAN_COMPANY_MCP_URL`。元典不可用时，系统继续生成带`[待核验法律依据]`的正式稿。
 
+网站创建案件时会强制选择案件阶段和劳动者/公司一方；案情、诉求、管辖和金额等其他信息允许缺失，并在正式稿中保留待填项。
+
 验证码邮件通过 Brevo HTTPS API 发送，不再配置 QQ SMTP。Brevo 的发件人邮箱必须先在 Brevo 中完成验证；API 密钥只保存到生成服务的环境变量中。
 
 先用预发布 Worker 完成“上传实际材料 → Queue → FastAPI 生成 → R2 文书 → D1 元数据 → 下载”闭环，再切换前端 API 地址。
