@@ -222,6 +222,346 @@ function json(data: unknown, init: ResponseInit = {}): Response {
   });
 }
 
+type CaseRow = {
+  id: string;
+  user_id: string;
+  title: string;
+  case_stage: string;
+  party_side: string;
+  status: string;
+  access_status: string;
+  data_json: string;
+  generation_count: number;
+  generation_version: string;
+  created_at: string;
+  expires_at: string;
+};
+
+type EvidenceRow = {
+  id: string;
+  original_name: string;
+  name: string;
+  source: string;
+  purpose: string;
+  object_key: string;
+  mime_type: string;
+  size_bytes: number;
+  sha256: string;
+  status: string;
+  created_at: string;
+};
+
+function parseCaseData(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function hasValue(value: unknown): boolean {
+  return typeof value === "string" ? value.trim().length > 0 : value !== null && value !== undefined;
+}
+
+function valueAt(data: Record<string, unknown>, path: string): unknown {
+  return path.split(".").reduce<unknown>((current, key) => {
+    return current && typeof current === "object" ? (current as Record<string, unknown>)[key] : undefined;
+  }, data);
+}
+
+function readinessFor(row: CaseRow, data: Record<string, unknown>) {
+  const missing: string[] = [];
+  const required = [
+    ["parties.initiating.name", "当事人姓名或名称"],
+    ["parties.opposing.name", "对方姓名或名称"],
+    ["employment_facts.start_date", "入职日期"],
+    ["employment_facts.summary", "基本案情"],
+  ] as const;
+  for (const [path, label] of required) if (!hasValue(valueAt(data, path))) missing.push(label);
+  if (row.case_stage === "litigation") {
+    if (!hasValue(valueAt(data, "arbitration.service_date"))) missing.push("仲裁裁决送达日期");
+    if (!hasValue(valueAt(data, "court"))) missing.push("管辖法院");
+  }
+  const conflicts = Array.isArray(data.unresolved_conflicts)
+    ? data.unresolved_conflicts.filter((item): item is string => typeof item === "string")
+    : [];
+  const unverifiedLaw = Array.isArray(data.unverified_law)
+    ? data.unverified_law.filter((item): item is string => typeof item === "string")
+    : [];
+  return {
+    readiness: missing.length || conflicts.length || unverifiedLaw.length
+      ? "formal_with_placeholders"
+      : "formal_complete",
+    missing_fields: missing,
+    unresolved_conflicts: conflicts,
+    unverified_law: unverifiedLaw,
+    evidence_gaps: [],
+  };
+}
+
+function evidencePayload(item: EvidenceRow) {
+  return {
+    id: item.id,
+    original_name: item.original_name,
+    name: item.name,
+    source: item.source,
+    purpose: item.purpose,
+    mime_type: item.mime_type,
+    size_bytes: item.size_bytes,
+    sha256: item.sha256,
+    status: item.status,
+    created_at: item.created_at,
+  };
+}
+
+async function ownedCase(request: Request, env: Env, caseId: string): Promise<{ user: PublicUser; row: CaseRow } | Response> {
+  const user = await currentUser(request, env);
+  if (!user) return json({ detail: "请先登录" }, { status: 401 });
+  const row = await env.DB.prepare(
+    "SELECT id, user_id, title, case_stage, party_side, status, access_status, data_json, generation_count, generation_version, created_at, expires_at FROM cases WHERE id = ? AND user_id = ?",
+  ).bind(caseId, user.id).first<CaseRow>();
+  if (!row) return json({ detail: "案件不存在" }, { status: 404 });
+  if (new Date(row.expires_at).getTime() <= Date.now()) return json({ detail: "案件已经到期" }, { status: 410 });
+  return { user, row };
+}
+
+async function casePayload(env: Env, row: CaseRow) {
+  const data = parseCaseData(row.data_json);
+  const readiness = readinessFor(row, data);
+  const [evidence, artifacts] = await Promise.all([
+    env.DB.prepare(
+      "SELECT id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, created_at FROM evidence WHERE case_id = ? ORDER BY created_at, id",
+    ).bind(row.id).all<EvidenceRow>(),
+    env.DB.prepare(
+      "SELECT id, filename, kind, created_at FROM artifacts WHERE case_id = ? ORDER BY created_at, id",
+    ).bind(row.id).all<{ id: string; filename: string; kind: string; created_at: string }>(),
+  ]);
+  return {
+    id: row.id,
+    title: row.title,
+    case_stage: row.case_stage,
+    party_side: row.party_side,
+    status: row.status,
+    access_status: row.access_status,
+    data,
+    generation_count: row.generation_count,
+    generation_version: row.generation_version,
+    created_at: row.created_at,
+    expires_at: row.expires_at,
+    ...readiness,
+    evidence: evidence.results.map(evidencePayload),
+    artifacts: artifacts.results,
+  };
+}
+
+async function listCases(request: Request, env: Env): Promise<Response> {
+  const user = await currentUser(request, env);
+  if (!user) return json({ detail: "请先登录" }, { status: 401 });
+  const rows = await env.DB.prepare(
+    "SELECT id, user_id, title, case_stage, party_side, status, access_status, data_json, generation_count, generation_version, created_at, expires_at FROM cases WHERE user_id = ? ORDER BY created_at DESC",
+  ).bind(user.id).all<CaseRow>();
+  return json(await Promise.all(rows.results.map((row) => casePayload(env, row))));
+}
+
+async function createCase(request: Request, env: Env): Promise<Response> {
+  const user = await currentUser(request, env);
+  if (!user) return json({ detail: "请先登录" }, { status: 401 });
+  let body: { title?: unknown; case_stage?: unknown; party_side?: unknown };
+  try {
+    body = await request.json() as typeof body;
+  } catch {
+    return json({ detail: "请求体必须是 JSON" }, { status: 400 });
+  }
+  const title = typeof body.title === "string" ? body.title.trim().slice(0, 200) : "";
+  const stage = body.case_stage === "arbitration" || body.case_stage === "litigation" ? body.case_stage : "";
+  const side = body.party_side === "worker" || body.party_side === "employer" ? body.party_side : "";
+  if (!title || !stage || !side) return json({ detail: "缺少案件名称、阶段或当事人一方" }, { status: 422 });
+
+  const entitlement = await env.DB.prepare("SELECT free_case_used FROM users WHERE id = ?").bind(user.id).first<{ free_case_used: number }>();
+  const accessStatus = Number(entitlement?.free_case_used ?? 0) === 0 ? "free" : "locked";
+  const now = new Date().toISOString();
+  const row: CaseRow = {
+    id: crypto.randomUUID(), user_id: user.id, title, case_stage: stage, party_side: side,
+    status: "draft", access_status: accessStatus, data_json: JSON.stringify({ conversation: [] }),
+    generation_count: 0, generation_version: "rules-1.0/templates-1.0", created_at: now,
+    expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+  };
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO cases (id, user_id, title, case_stage, party_side, status, access_status, data_json, generation_count, generation_version, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(row.id, row.user_id, row.title, row.case_stage, row.party_side, row.status, row.access_status, row.data_json, row.generation_count, row.generation_version, row.created_at, row.expires_at),
+    env.DB.prepare("UPDATE users SET free_case_used = 1 WHERE id = ?").bind(user.id),
+  ]);
+  return json(await casePayload(env, row), { status: 201 });
+}
+
+async function updateCase(request: Request, env: Env, caseId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  let body: { title?: unknown; data?: unknown };
+  try {
+    body = await request.json() as typeof body;
+  } catch {
+    return json({ detail: "请求体必须是 JSON" }, { status: 400 });
+  }
+  const title = typeof body.title === "string" ? body.title.trim().slice(0, 200) : owned.row.title;
+  const data = body.data && typeof body.data === "object" && !Array.isArray(body.data) ? body.data : parseCaseData(owned.row.data_json);
+  await env.DB.prepare("UPDATE cases SET title = ?, data_json = ?, status = 'ready_to_generate' WHERE id = ? AND user_id = ?")
+    .bind(title, JSON.stringify(data), caseId, owned.user.id).run();
+  const row = { ...owned.row, title, data_json: JSON.stringify(data), status: "ready_to_generate" };
+  return json(await casePayload(env, row));
+}
+
+async function chatCase(request: Request, env: Env, caseId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  let body: { message?: unknown; consent_cloud_processing?: unknown };
+  try { body = await request.json() as typeof body; } catch { return json({ detail: "请求体必须是 JSON" }, { status: 400 }); }
+  const message = typeof body.message === "string" ? body.message.trim().slice(0, 10000) : "";
+  if (!message) return json({ detail: "请输入案情" }, { status: 422 });
+  const data = parseCaseData(owned.row.data_json);
+  const conversation = Array.isArray(data.conversation) ? [...data.conversation] : [];
+  conversation.push({ role: "user", content: message });
+  const assessment = readinessFor(owned.row, data);
+  const reply = assessment.missing_fields.length
+    ? `已记录。下一项可以补充：${assessment.missing_fields[0]}。如果暂时不知道，也可以继续描述其他情况。`
+    : "已记录案情。你可以在信息确认页核对内容，也可以直接准备生成正式稿。";
+  conversation.push({ role: "assistant", content: reply });
+  data.conversation = conversation;
+  await env.DB.prepare("UPDATE cases SET data_json = ?, status = 'pending_confirmation' WHERE id = ? AND user_id = ?")
+    .bind(JSON.stringify(data), caseId, owned.user.id).run();
+  return json({ data, reply, readiness: assessment.readiness, missing_fields: assessment.missing_fields });
+}
+
+function safeFilename(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 120) || "file";
+}
+
+async function sha256Hex(value: ArrayBuffer): Promise<string> {
+  return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", value)));
+}
+
+async function uploadEvidence(request: Request, env: Env, caseId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  const form = await request.formData();
+  const value = form.get("file");
+  if (!(value instanceof File) || !value.name) return json({ detail: "请选择证据文件" }, { status: 422 });
+  const count = await env.DB.prepare("SELECT COUNT(*) AS count FROM evidence WHERE case_id = ?").bind(caseId).first<{ count: number | string }>();
+  if (Number(count?.count ?? 0) >= 20) return json({ detail: "每个案件最多上传20个文件" }, { status: 413 });
+  if (value.size > 50 * 1024 * 1024) return json({ detail: "单个文件不能超过50MB" }, { status: 413 });
+  const allowed = /\.(pdf|jpg|jpeg|png|doc|docx|xls|xlsx)$/i.test(value.name);
+  if (!allowed) return json({ detail: "不支持的文件类型" }, { status: 415 });
+  const bytes = await value.arrayBuffer();
+  const id = crypto.randomUUID();
+  const key = `cases/${owned.user.id}/${caseId}/${id}-${safeFilename(value.name)}`;
+  await env.FILES.put(key, bytes, { httpMetadata: { contentType: value.type || "application/octet-stream" } });
+  const now = new Date().toISOString();
+  const row: EvidenceRow = {
+    id, original_name: value.name.slice(0, 255), name: value.name.replace(/\.[^.]+$/, "").slice(0, 255),
+    source: "", purpose: "", object_key: key, mime_type: value.type || "application/octet-stream",
+    size_bytes: value.size, sha256: await sha256Hex(bytes), status: "ready", created_at: now,
+  };
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO evidence (id, case_id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(row.id, caseId, row.original_name, row.name, row.source, row.purpose, row.object_key, row.mime_type, row.size_bytes, row.sha256, row.status, row.created_at),
+    env.DB.prepare("UPDATE cases SET status = 'materials_processing' WHERE id = ?").bind(caseId),
+  ]);
+  return json(evidencePayload(row), { status: 201 });
+}
+
+async function updateEvidence(request: Request, env: Env, caseId: string, evidenceId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  let body: { name?: unknown; source?: unknown; purpose?: unknown };
+  try { body = await request.json() as typeof body; } catch { return json({ detail: "请求体必须是 JSON" }, { status: 400 }); }
+  const row = await env.DB.prepare("SELECT id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, created_at FROM evidence WHERE id = ? AND case_id = ?")
+    .bind(evidenceId, caseId).first<EvidenceRow>();
+  if (!row) return json({ detail: "证据不存在" }, { status: 404 });
+  const next = {
+    name: typeof body.name === "string" ? body.name.trim().slice(0, 255) : row.name,
+    source: typeof body.source === "string" ? body.source.trim().slice(0, 255) : row.source,
+    purpose: typeof body.purpose === "string" ? body.purpose.trim().slice(0, 2000) : row.purpose,
+  };
+  await env.DB.prepare("UPDATE evidence SET name = ?, source = ?, purpose = ? WHERE id = ? AND case_id = ?")
+    .bind(next.name, next.source, next.purpose, evidenceId, caseId).run();
+  return json({ ...row, ...next });
+}
+
+async function deleteEvidence(request: Request, env: Env, caseId: string, evidenceId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  const row = await env.DB.prepare("SELECT object_key FROM evidence WHERE id = ? AND case_id = ?").bind(evidenceId, caseId).first<{ object_key: string }>();
+  if (!row) return json({ detail: "证据不存在" }, { status: 404 });
+  await env.FILES.delete(row.object_key);
+  await env.DB.prepare("DELETE FROM evidence WHERE id = ? AND case_id = ?").bind(evidenceId, caseId).run();
+  return new Response(null, { status: 204 });
+}
+
+async function generateCase(request: Request, env: Env, caseId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  if (owned.row.access_status === "locked") return json({ detail: "请先使用兑换码解锁该案件" }, { status: 402 });
+  if (owned.row.generation_count >= 3) return json({ detail: "本案件最多成功生成3次" }, { status: 429 });
+  const running = await env.DB.prepare("SELECT id FROM generation_jobs WHERE case_id = ? AND status IN ('queued', 'running', 'dispatched') LIMIT 1")
+    .bind(caseId).first<{ id: string }>();
+  if (running) return json({ detail: "已有生成任务正在处理中" }, { status: 409 });
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO generation_jobs (id, case_id, status, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?)").bind(jobId, caseId, now, now),
+    env.DB.prepare("UPDATE cases SET status = 'generating' WHERE id = ?").bind(caseId),
+  ]);
+  try {
+    await env.GENERATION_QUEUE.send({ version: 1, job_id: jobId, case_id: caseId, requested_at: now });
+  } catch (error) {
+    await env.DB.prepare("UPDATE generation_jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?")
+      .bind(`入队失败：${String(error)}`.slice(0, 2000), new Date().toISOString(), jobId).run();
+    return json({ detail: "生成任务入队失败", job_id: jobId }, { status: 503 });
+  }
+  return json({ job_id: jobId, status: "queued" }, { status: 202 });
+}
+
+async function getGenerationJob(request: Request, env: Env, caseId: string, jobId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  const row = await env.DB.prepare("SELECT id, status, error, result_json FROM generation_jobs WHERE id = ? AND case_id = ?")
+    .bind(jobId, caseId).first<{ id: string; status: string; error: string | null; result_json: string }>();
+  if (!row) return json({ detail: "生成任务不存在" }, { status: 404 });
+  return json({ id: row.id, status: row.status, error: row.error, result: parseCaseData(row.result_json) });
+}
+
+async function downloadArtifact(request: Request, env: Env, caseId: string, artifactId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  const row = await env.DB.prepare("SELECT filename, object_key FROM artifacts WHERE id = ? AND case_id = ?")
+    .bind(artifactId, caseId).first<{ filename: string; object_key: string }>();
+  if (!row) return json({ detail: "文件不存在" }, { status: 404 });
+  const object = await env.FILES.get(row.object_key);
+  if (!object) return json({ detail: "文件不存在" }, { status: 404 });
+  const headers = new Headers({ "Content-Type": object.httpMetadata?.contentType || "application/octet-stream", "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(row.filename)}` });
+  return new Response(object.body, { headers });
+}
+
+async function legalSearch(request: Request, env: Env, caseId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  let body: { query?: unknown };
+  try { body = await request.json() as typeof body; } catch { return json({ detail: "请求体必须是 JSON" }, { status: 400 }); }
+  const query = typeof body.query === "string" ? body.query.trim().slice(0, 500) : "";
+  if (!query) return json({ detail: "请输入检索词" }, { status: 422 });
+  const data = parseCaseData(owned.row.data_json);
+  const snapshots = Array.isArray(data.legal_snapshots) ? [...data.legal_snapshots] : [];
+  const snapshot = { verified: false, source: "yuandian:not-configured", query, retrieved_at: new Date().toISOString(), content: {} };
+  snapshots.push(snapshot);
+  data.legal_snapshots = snapshots.slice(-20);
+  await env.DB.prepare("UPDATE cases SET data_json = ? WHERE id = ? AND user_id = ?").bind(JSON.stringify(data), caseId, owned.user.id).run();
+  return json({ snapshot, readiness: readinessFor(owned.row, data).readiness });
+}
+
 function isAuthorized(request: Request, env: Env): boolean {
   if (env.ENVIRONMENT === "local") {
     return true;
@@ -571,6 +911,38 @@ export default {
     if (request.method === "GET" && url.pathname === "/api/auth/me") {
       const user = await currentUser(request, env);
       return user ? json(user) : json({ detail: "请先登录" }, { status: 401 });
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/cases") {
+      return listCases(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/cases") {
+      return createCase(request, env);
+    }
+
+    const caseMatch = url.pathname.match(/^\/api\/cases\/([^/]+)(?:\/(.*))?$/);
+    if (caseMatch) {
+      const caseId = decodeURIComponent(caseMatch[1]);
+      const subpath = caseMatch[2] ?? "";
+      if (request.method === "GET" && !subpath) {
+        const owned = await ownedCase(request, env, caseId);
+        return owned instanceof Response ? owned : json(await casePayload(env, owned.row));
+      }
+      if (request.method === "PATCH" && !subpath) return updateCase(request, env, caseId);
+      if (request.method === "POST" && subpath === "chat") return chatCase(request, env, caseId);
+      if (request.method === "POST" && subpath === "evidence") return uploadEvidence(request, env, caseId);
+      if (request.method === "POST" && subpath === "generate") return generateCase(request, env, caseId);
+      if (request.method === "POST" && subpath === "legal-search") return legalSearch(request, env, caseId);
+      if (request.method === "GET" && subpath.startsWith("generation-jobs/")) {
+        return getGenerationJob(request, env, caseId, decodeURIComponent(subpath.slice("generation-jobs/".length)));
+      }
+      if (request.method === "GET" && subpath.startsWith("artifacts/")) {
+        return downloadArtifact(request, env, caseId, decodeURIComponent(subpath.slice("artifacts/".length)));
+      }
+      const evidenceMatch = subpath.match(/^evidence\/([^/]+)$/);
+      if (evidenceMatch && request.method === "PATCH") return updateEvidence(request, env, caseId, decodeURIComponent(evidenceMatch[1]));
+      if (evidenceMatch && request.method === "DELETE") return deleteEvidence(request, env, caseId, decodeURIComponent(evidenceMatch[1]));
     }
 
     if (request.method === "POST" && url.pathname === "/api/internal/generation-jobs") {
