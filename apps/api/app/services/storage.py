@@ -117,7 +117,7 @@ async def save_upload(case_id: str, upload: UploadFile) -> dict:
             str(target),
             settings.s3_bucket,
             key,
-            ExtraArgs={"ContentType": detected_mime, "ServerSideEncryption": "AES256"},
+            ExtraArgs={"ContentType": detected_mime},
         )
         stored_path = _s3_uri(key)
         target.unlink(missing_ok=True)
@@ -166,7 +166,7 @@ def persist_artifact(case_id: str, path: Path) -> str:
         str(path),
         settings.s3_bucket,
         key,
-        ExtraArgs={"ContentType": "application/octet-stream", "ServerSideEncryption": "AES256"},
+        ExtraArgs={"ContentType": "application/octet-stream"},
     )
     path.unlink(missing_ok=True)
     return _s3_uri(key)
