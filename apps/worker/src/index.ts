@@ -151,10 +151,12 @@ async function currentUser(request: Request, env: Env): Promise<PublicUser | nul
   return user ?? null;
 }
 
-async function sendOtpEmail(env: Env, email: string, code: string): Promise<boolean> {
+type EmailSendResult = { ok: true } | { ok: false; detail: string };
+
+async function sendOtpEmail(env: Env, email: string, code: string): Promise<EmailSendResult> {
   const generatorUrl = env.GENERATOR_URL?.trim();
   const generatorToken = env.GENERATOR_AUTH_TOKEN?.trim();
-  if (!generatorUrl || !generatorToken) return false;
+  if (!generatorUrl || !generatorToken) return { ok: false, detail: "邮件服务连接尚未配置" };
   try {
     const response = await fetch(`${generatorUrl.replace(/\/$/, "")}/internal/auth/send-otp`, {
       method: "POST",
@@ -164,9 +166,16 @@ async function sendOtpEmail(env: Env, email: string, code: string): Promise<bool
       },
       body: JSON.stringify({ email, code }),
     });
-    return response.ok;
+    if (response.ok) return { ok: true };
+    let detail = "验证码邮件发送失败，请稍后重试";
+    try {
+      const body = await response.json() as { detail?: unknown };
+      if (typeof body.detail === "string" && body.detail.length <= 200) detail = body.detail;
+    } catch {}
+    if (response.status === 401) detail = "邮件服务内部令牌不匹配";
+    return { ok: false, detail };
   } catch {
-    return false;
+    return { ok: false, detail: "无法连接邮件生成服务，请稍后重试" };
   }
 }
 
@@ -227,9 +236,10 @@ async function requestAuthCode(request: Request, env: Env): Promise<Response> {
   ).bind(id, email, await hmacHex(secret, `otp:${email}:${code}`), new Date(Date.now() + 10 * 60 * 1000).toISOString(), now).run();
 
   if (env.ENVIRONMENT === "local") return json({ message: "验证码已生成", dev_code: code });
-  if (!(await sendOtpEmail(env, email, code))) {
+  const emailResult = await sendOtpEmail(env, email, code);
+  if (!emailResult.ok) {
     await env.DB.prepare("DELETE FROM otp_codes WHERE id = ?").bind(id).run();
-    return json({ detail: "验证码邮件服务暂未配置或发送失败" }, { status: 503 });
+    return json({ detail: emailResult.detail }, { status: 503 });
   }
   return json({ message: "验证码已发送，有效期 10 分钟" });
 }
@@ -312,9 +322,10 @@ async function requestRegistrationCode(request: Request, env: Env): Promise<Resp
   ).bind(id, email, await hmacHex(secret, `otp:register:${email}:${code}`), new Date(Date.now() + 10 * 60 * 1000).toISOString(), now).run();
 
   if (env.ENVIRONMENT === "local") return json({ message: "注册验证码已生成", dev_code: code });
-  if (!(await sendOtpEmail(env, email, code))) {
+  const emailResult = await sendOtpEmail(env, email, code);
+  if (!emailResult.ok) {
     await env.DB.prepare("DELETE FROM otp_codes WHERE id = ?").bind(id).run();
-    return json({ detail: "验证码邮件发送失败，请稍后重试" }, { status: 503 });
+    return json({ detail: emailResult.detail }, { status: 503 });
   }
   return json({ message: "注册验证码已发送，有效期 10 分钟" });
 }

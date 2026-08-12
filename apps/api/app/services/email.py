@@ -1,9 +1,13 @@
+import logging
 import re
 
 import httpx
 from fastapi import HTTPException, status
 
 from app.config import get_settings
+
+
+logger = logging.getLogger(__name__)
 
 
 def _clean_setting(value: str | None, key: str) -> str | None:
@@ -43,6 +47,33 @@ def send_otp_email(recipient: str, code: str) -> None:
             json=payload,
             timeout=15,
         )
-        response.raise_for_status()
+        if response.is_success:
+            return
+        try:
+            error_body = response.json()
+        except ValueError:
+            error_body = {}
+        error_code = str(error_body.get("code") or "")
+        error_message = str(error_body.get("message") or "")
+        logger.error(
+            "[BREVO-SEND-ERROR] status=%s code=%s message=%s",
+            response.status_code,
+            error_code[:80],
+            error_message[:300],
+        )
+        if response.status_code in {401, 403}:
+            detail = "Brevo API 密钥无效或没有邮件发送权限"
+        elif response.status_code == 429:
+            detail = "Brevo 邮件发送额度或频率已达到限制"
+        elif response.status_code == 400 and any(
+            word in f"{error_code} {error_message}".lower() for word in ("sender", "from", "email")
+        ):
+            detail = "Brevo 发件人邮箱未验证或配置格式不正确"
+        else:
+            detail = f"Brevo 邮件服务返回错误（HTTP {response.status_code}）"
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail)
+    except HTTPException:
+        raise
     except (httpx.HTTPError, ValueError) as exc:
+        logger.exception("[BREVO-SEND-ERROR] request failed")
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "验证码邮件发送失败，请稍后重试") from exc
