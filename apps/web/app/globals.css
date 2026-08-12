@@ -120,6 +120,8 @@ svg { flex: none; }
 .code-input { text-align: center; font-size: 24px; letter-spacing: .5em; font-weight: 750; }
 .inline-code { border: 0; padding: 2px 6px; color: var(--blue); background: var(--blue-soft); border-radius: 4px; font-family: ui-monospace, monospace; }
 .form-error { padding: 10px 12px; color: var(--red); background: var(--red-soft); border-left: 3px solid var(--red); font-size: 13px; }
+.auth-mode-actions { margin-top: 18px; display: flex; justify-content: center; flex-wrap: wrap; gap: 14px; }
+.auth-mode-actions .text-link { border: 0; padding: 0; background: transparent; cursor: pointer; font: inherit; }
 .auth-security { margin: 22px 0 0; display: flex; justify-content: center; align-items: center; gap: 7px; color: var(--muted-text); font-size: 12px; }
 
 /* Shared app */
