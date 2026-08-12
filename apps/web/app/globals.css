@@ -264,6 +264,22 @@ svg { flex: none; }
 .evidence-row { display: grid; grid-template-columns: .8fr 1.5fr; gap: 10px; }
 .evidence-fields small { color: var(--muted-text); font-size: 11px; }
 .evidence-actions { display: flex; gap: 6px; }
+.evidence-summary { min-width: 0; display: grid; gap: 6px; }
+.evidence-summary > strong { font-size: 15px; }
+.evidence-summary > small { color: var(--muted-text); overflow-wrap: anywhere; }
+.evidence-summary dl { margin: 5px 0 0; display: grid; grid-template-columns: .8fr 1.5fr; gap: 10px; }
+.consent-line { display: flex; align-items: flex-start; gap: 10px; margin: 0 32px 28px; color: var(--muted-text); font-size: 13px; line-height: 1.6; }
+.consent-line input { width: 17px; height: 17px; margin-top: 2px; accent-color: var(--blue); flex: 0 0 auto; }
+.evidence-summary dl > div { padding: 10px 12px; background: #f7f9fc; border: 1px solid var(--line); }
+.evidence-summary dt { color: var(--muted-text); font-size: 11px; font-weight: 700; }
+.evidence-summary dd { margin: 4px 0 0; color: var(--ink-soft); font-size: 13px; line-height: 1.6; }
+.task-progress { margin: 14px 0; padding: 14px; background: #f7f9fc; border: 1px solid var(--line); }
+.task-progress.compact { margin: 5px 0 0; padding: 10px; }
+.task-progress > div:first-child { display: flex; justify-content: space-between; gap: 15px; color: var(--ink-soft); font-size: 12px; }
+.task-progress > div:first-child strong { color: var(--blue); }
+.progress-track { height: 7px; margin-top: 9px; overflow: hidden; background: #dfe7f2; border-radius: 999px; }
+.progress-track > span { display: block; height: 100%; background: var(--blue); border-radius: inherit; transition: width .25s ease; }
+.form-hint { margin-top: -15px; text-align: center; color: var(--muted-text); font-size: 12px; }
 .readiness-card { margin: 28px 32px 22px; padding: 20px; display: flex; gap: 14px; border-left: 4px solid; }
 .readiness-card.complete { color: var(--green); background: var(--green-soft); border-color: var(--green); }
 .readiness-card.pending { color: var(--amber); background: var(--amber-soft); border-color: var(--amber); }
@@ -405,6 +421,7 @@ svg { flex: none; }
   .evidence-item { grid-template-columns: 34px 1fr; }
   .evidence-actions { grid-column: 2; }
   .evidence-row { grid-template-columns: 1fr; }
+  .evidence-summary dl { grid-template-columns: 1fr; }
   .redeem-panel { align-items: stretch; flex-direction: column; }
   .redeem-form { flex-direction: column; }
   .generate-button { width: calc(100% - 36px); margin-left: 18px; margin-right: 18px; }

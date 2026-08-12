@@ -61,6 +61,12 @@ class InternalGenerationJobInput(BaseModel):
     case_id: str = Field(min_length=1, max_length=100)
 
 
+class InternalEvidenceAnalysisInput(BaseModel):
+    version: int = Field(default=1, ge=1, le=1)
+    evidence_id: str = Field(min_length=1, max_length=100)
+    case_id: str = Field(min_length=1, max_length=100)
+
+
 class InternalOtpInput(BaseModel):
     email: EmailStr
     code: str = Field(pattern=r"^\d{6}$")

@@ -1,14 +1,25 @@
 interface GenerationMessage {
+  type?: "generation";
   version: 1;
   job_id: string;
   case_id: string;
   requested_at: string;
 }
 
+interface EvidenceAnalysisMessage {
+  type: "evidence_analysis";
+  version: 1;
+  evidence_id: string;
+  case_id: string;
+  requested_at: string;
+}
+
+type QueueMessage = GenerationMessage | EvidenceAnalysisMessage;
+
 interface Env {
   DB: D1Database;
   FILES: R2Bucket;
-  GENERATION_QUEUE: Queue<GenerationMessage>;
+  GENERATION_QUEUE: Queue<QueueMessage>;
   ENVIRONMENT: string;
   GENERATOR_URL?: string;
   GENERATOR_AUTH_TOKEN?: string;
@@ -474,6 +485,9 @@ type EvidenceRow = {
   size_bytes: number;
   sha256: string;
   status: string;
+  processing_stage: string;
+  processing_progress: number;
+  analysis_json: string;
   created_at: string;
 };
 
@@ -537,6 +551,9 @@ function evidencePayload(item: EvidenceRow) {
     size_bytes: item.size_bytes,
     sha256: item.sha256,
     status: item.status,
+    processing_stage: item.processing_stage,
+    processing_progress: item.processing_progress,
+    analysis: parseCaseData(item.analysis_json),
     created_at: item.created_at,
   };
 }
@@ -557,7 +574,7 @@ async function casePayload(env: Env, row: CaseRow, user?: PublicUser) {
   const readiness = readinessFor(row, data);
   const [evidence, artifacts] = await Promise.all([
     env.DB.prepare(
-      "SELECT id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, created_at FROM evidence WHERE case_id = ? ORDER BY created_at, id",
+      "SELECT id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, processing_stage, processing_progress, analysis_json, created_at FROM evidence WHERE case_id = ? ORDER BY created_at, id",
     ).bind(row.id).all<EvidenceRow>(),
     env.DB.prepare(
       "SELECT id, filename, kind, created_at FROM artifacts WHERE case_id = ? ORDER BY created_at, id",
@@ -602,7 +619,6 @@ async function createCase(request: Request, env: Env): Promise<Response> {
   }
   const facts = typeof body.facts === "string" ? body.facts.trim().slice(0, 20000) : "";
   const claimsText = typeof body.claims_text === "string" ? body.claims_text.trim().slice(0, 10000) : "";
-  if (!facts || !claimsText) return json({ detail: "请填写案情经过和诉求" }, { status: 422 });
   if (body.case_stage !== "arbitration" && body.case_stage !== "litigation") return json({ detail: "请选择当前案件阶段" }, { status: 422 });
   if (body.party_side !== "worker" && body.party_side !== "employer") return json({ detail: "请选择申请人/原告一方" }, { status: 422 });
   const stage = body.case_stage;
@@ -703,6 +719,9 @@ async function uploadEvidence(request: Request, env: Env, caseId: string): Promi
   const owned = await ownedCase(request, env, caseId);
   if (owned instanceof Response) return owned;
   const form = await request.formData();
+  if (form.get("consent_cloud_processing") !== "true") {
+    return json({ detail: "请先同意将案情说明和材料文字发送至大模型进行本次处理" }, { status: 422 });
+  }
   const value = form.get("file");
   if (!(value instanceof File) || !value.name) return json({ detail: "请选择证据文件" }, { status: 422 });
   const count = await env.DB.prepare("SELECT COUNT(*) AS count FROM evidence WHERE case_id = ?").bind(caseId).first<{ count: number | string }>();
@@ -716,15 +735,23 @@ async function uploadEvidence(request: Request, env: Env, caseId: string): Promi
   await env.FILES.put(key, bytes, { httpMetadata: { contentType: value.type || "application/octet-stream" } });
   const now = new Date().toISOString();
   const row: EvidenceRow = {
-    id, original_name: value.name.slice(0, 255), name: value.name.replace(/\.[^.]+$/, "").slice(0, 255),
+    id, original_name: value.name.slice(0, 255), name: "材料识别中",
     source: "", purpose: "", object_key: key, mime_type: value.type || "application/octet-stream",
-    size_bytes: value.size, sha256: await sha256Hex(bytes), status: "ready", created_at: now,
+    size_bytes: value.size, sha256: await sha256Hex(bytes), status: "processing",
+    processing_stage: "queued", processing_progress: 10, analysis_json: "{}", created_at: now,
   };
   await env.DB.batch([
-    env.DB.prepare("INSERT INTO evidence (id, case_id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(row.id, caseId, row.original_name, row.name, row.source, row.purpose, row.object_key, row.mime_type, row.size_bytes, row.sha256, row.status, row.created_at),
+    env.DB.prepare("INSERT INTO evidence (id, case_id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, processing_stage, processing_progress, analysis_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(row.id, caseId, row.original_name, row.name, row.source, row.purpose, row.object_key, row.mime_type, row.size_bytes, row.sha256, row.status, row.processing_stage, row.processing_progress, row.analysis_json, row.created_at),
     env.DB.prepare("UPDATE cases SET status = 'materials_processing' WHERE id = ?").bind(caseId),
   ]);
+  try {
+    await env.GENERATION_QUEUE.send({ type: "evidence_analysis", version: 1, evidence_id: id, case_id: caseId, requested_at: now });
+  } catch (error) {
+    await env.DB.prepare("UPDATE evidence SET status = 'failed', processing_stage = 'failed', processing_progress = 100 WHERE id = ?")
+      .bind(id).run();
+    return json({ detail: `材料识别任务入队失败：${String(error)}` }, { status: 503 });
+  }
   return json(evidencePayload(row), { status: 201 });
 }
 
@@ -733,7 +760,7 @@ async function updateEvidence(request: Request, env: Env, caseId: string, eviden
   if (owned instanceof Response) return owned;
   let body: { name?: unknown; source?: unknown; purpose?: unknown };
   try { body = await request.json() as typeof body; } catch { return json({ detail: "请求体必须是 JSON" }, { status: 400 }); }
-  const row = await env.DB.prepare("SELECT id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, created_at FROM evidence WHERE id = ? AND case_id = ?")
+  const row = await env.DB.prepare("SELECT id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, processing_stage, processing_progress, analysis_json, created_at FROM evidence WHERE id = ? AND case_id = ?")
     .bind(evidenceId, caseId).first<EvidenceRow>();
   if (!row) return json({ detail: "证据不存在" }, { status: 404 });
   const next = {
@@ -759,19 +786,27 @@ async function deleteEvidence(request: Request, env: Env, caseId: string, eviden
 async function generateCase(request: Request, env: Env, caseId: string): Promise<Response> {
   const owned = await ownedCase(request, env, caseId);
   if (owned instanceof Response) return owned;
+  let body: { consent_cloud_processing?: unknown };
+  try { body = await request.json() as typeof body; } catch { return json({ detail: "请求体必须是 JSON" }, { status: 400 }); }
+  if (body.consent_cloud_processing !== true) {
+    return json({ detail: "请先同意将案情说明和材料文字发送至大模型进行本次处理" }, { status: 422 });
+  }
   if (isTestAdmin(env, owned.user)) {
     owned.row.access_status = "free";
     owned.row.generation_count = 0;
   }
   if (owned.row.access_status === "locked") return json({ detail: "请先使用兑换码解锁该案件" }, { status: 402 });
   if (owned.row.generation_count >= 3) return json({ detail: "本案件最多成功生成3次" }, { status: 429 });
+  const material = await env.DB.prepare("SELECT id FROM evidence WHERE case_id = ? AND status = 'processing' LIMIT 1")
+    .bind(caseId).first<{ id: string }>();
+  if (material) return json({ detail: "材料仍在识别，请等待进度完成后再生成" }, { status: 409 });
   const running = await env.DB.prepare("SELECT id FROM generation_jobs WHERE case_id = ? AND status IN ('queued', 'running', 'dispatched') LIMIT 1")
     .bind(caseId).first<{ id: string }>();
   if (running) return json({ detail: "已有生成任务正在处理中" }, { status: 409 });
   const jobId = crypto.randomUUID();
   const now = new Date().toISOString();
   await env.DB.batch([
-    env.DB.prepare("INSERT INTO generation_jobs (id, case_id, status, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?)").bind(jobId, caseId, now, now),
+    env.DB.prepare("INSERT INTO generation_jobs (id, case_id, status, stage, progress, created_at, updated_at) VALUES (?, ?, 'queued', 'queued', 5, ?, ?)").bind(jobId, caseId, now, now),
     env.DB.prepare("UPDATE cases SET status = 'generating' WHERE id = ?").bind(caseId),
   ]);
   try {
@@ -787,10 +822,10 @@ async function generateCase(request: Request, env: Env, caseId: string): Promise
 async function getGenerationJob(request: Request, env: Env, caseId: string, jobId: string): Promise<Response> {
   const owned = await ownedCase(request, env, caseId);
   if (owned instanceof Response) return owned;
-  const row = await env.DB.prepare("SELECT id, status, error, result_json FROM generation_jobs WHERE id = ? AND case_id = ?")
-    .bind(jobId, caseId).first<{ id: string; status: string; error: string | null; result_json: string }>();
+  const row = await env.DB.prepare("SELECT id, status, stage, progress, error, result_json FROM generation_jobs WHERE id = ? AND case_id = ?")
+    .bind(jobId, caseId).first<{ id: string; status: string; stage: string; progress: number; error: string | null; result_json: string }>();
   if (!row) return json({ detail: "生成任务不存在" }, { status: 404 });
-  return json({ id: row.id, status: row.status, error: row.error, result: parseCaseData(row.result_json) });
+  return json({ id: row.id, status: row.status, stage: row.stage, progress: row.progress, error: row.error, result: parseCaseData(row.result_json) });
 }
 
 async function downloadArtifact(request: Request, env: Env, caseId: string, artifactId: string): Promise<Response> {
@@ -878,13 +913,14 @@ async function enqueueGeneration(request: Request, env: Env): Promise<Response> 
   const jobId = crypto.randomUUID();
   const now = new Date().toISOString();
   await env.DB.prepare(
-    "INSERT INTO generation_jobs (id, case_id, status, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?)",
+    "INSERT INTO generation_jobs (id, case_id, status, stage, progress, created_at, updated_at) VALUES (?, ?, 'queued', 'queued', 5, ?, ?)",
   )
     .bind(jobId, caseId, now, now)
     .run();
 
   try {
     await env.GENERATION_QUEUE.send({
+      type: "generation",
       version: 1,
       job_id: jobId,
       case_id: caseId,
@@ -932,7 +968,7 @@ async function getGenerationInput(request: Request, env: Env, caseId: string): P
   }
 
   const evidence = await env.DB.prepare(
-    "SELECT id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, created_at FROM evidence WHERE case_id = ? ORDER BY created_at, id",
+    "SELECT id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, processing_stage, processing_progress, analysis_json, created_at FROM evidence WHERE case_id = ? ORDER BY created_at, id",
   )
     .bind(caseId)
     .all<{
@@ -946,6 +982,9 @@ async function getGenerationInput(request: Request, env: Env, caseId: string): P
       size_bytes: number;
       sha256: string;
       status: string;
+      processing_stage: string;
+      processing_progress: number;
+      analysis_json: string;
       created_at: string;
     }>();
 
@@ -979,17 +1018,74 @@ async function getGenerationInput(request: Request, env: Env, caseId: string): P
   );
 }
 
+async function updateGenerationProgress(request: Request, env: Env, jobId: string): Promise<Response> {
+  if (!isAuthorized(request, env)) return json({ detail: "未授权" }, { status: 401 });
+  let body: { stage?: unknown; progress?: unknown };
+  try { body = await request.json() as typeof body; } catch { return json({ detail: "请求体必须是 JSON" }, { status: 400 }); }
+  const stage = typeof body.stage === "string" ? body.stage.trim().slice(0, 80) : "processing";
+  const progress = Math.max(1, Math.min(99, Math.round(Number(body.progress) || 1)));
+  await env.DB.prepare("UPDATE generation_jobs SET status = 'running', stage = ?, progress = ?, updated_at = ? WHERE id = ?")
+    .bind(stage, progress, new Date().toISOString(), jobId).run();
+  return json({ status: "ok" });
+}
+
+async function dispatchEvidenceAnalysis(message: Message<EvidenceAnalysisMessage>, env: Env): Promise<void> {
+  const { evidence_id: evidenceId, case_id: caseId } = message.body;
+  await env.DB.prepare("UPDATE evidence SET status = 'processing', processing_stage = 'extracting', processing_progress = 25 WHERE id = ? AND case_id = ?")
+    .bind(evidenceId, caseId).run();
+  const generatorUrl = env.GENERATOR_URL?.trim();
+  if (!generatorUrl) {
+    await env.DB.prepare("UPDATE evidence SET status = 'failed', processing_stage = 'failed', processing_progress = 100 WHERE id = ?")
+      .bind(evidenceId).run();
+    message.ack();
+    return;
+  }
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (env.GENERATOR_AUTH_TOKEN) headers.set("Authorization", `Bearer ${env.GENERATOR_AUTH_TOKEN}`);
+  let response: Response;
+  try {
+    await env.DB.prepare("UPDATE evidence SET processing_stage = 'analyzing', processing_progress = 55 WHERE id = ?").bind(evidenceId).run();
+    response = await fetch(`${generatorUrl.replace(/\/$/, "")}/internal/evidence-analysis`, {
+      method: "POST", headers, body: JSON.stringify({ version: 1, evidence_id: evidenceId, case_id: caseId }),
+    });
+  } catch (error) {
+    await env.DB.prepare("UPDATE evidence SET processing_stage = 'retrying', processing_progress = 55 WHERE id = ?").bind(evidenceId).run();
+    throw error;
+  }
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 1000);
+    if (response.status >= 400 && response.status < 500) {
+      await env.DB.prepare("UPDATE evidence SET status = 'failed', processing_stage = 'failed', processing_progress = 100, analysis_json = ? WHERE id = ?")
+        .bind(JSON.stringify({ error: detail }), evidenceId).run();
+      message.ack();
+      return;
+    }
+    throw new Error(`evidence analyzer returned ${response.status}`);
+  }
+  const result = await response.json() as { name?: unknown; source?: unknown; purpose?: unknown; analysis?: unknown };
+  const name = typeof result.name === "string" ? result.name.trim().slice(0, 255) : "材料";
+  const source = typeof result.source === "string" ? result.source.trim().slice(0, 255) : "[待核实来源]";
+  const purpose = typeof result.purpose === "string" ? result.purpose.trim().slice(0, 2000) : "[待核实证明目的]";
+  await env.DB.batch([
+    env.DB.prepare("UPDATE evidence SET name = ?, source = ?, purpose = ?, status = 'ready', processing_stage = 'complete', processing_progress = 100, analysis_json = ? WHERE id = ? AND case_id = ?")
+      .bind(name || "材料", source, purpose, JSON.stringify(result.analysis || {}), evidenceId, caseId),
+    env.DB.prepare("UPDATE cases SET status = CASE WHEN NOT EXISTS (SELECT 1 FROM evidence WHERE case_id = ? AND status = 'processing' AND id <> ?) THEN 'ready_to_generate' ELSE status END WHERE id = ?")
+      .bind(caseId, evidenceId, caseId),
+  ]);
+  message.ack();
+}
+
 async function dispatchGeneration(message: Message<GenerationMessage>, env: Env): Promise<void> {
   const { job_id: jobId, case_id: caseId } = message.body;
   const now = new Date().toISOString();
-  await env.DB.prepare("UPDATE generation_jobs SET status = 'running', updated_at = ? WHERE id = ?")
+  await env.DB.prepare("UPDATE generation_jobs SET status = 'running', stage = 'preparing', progress = 10, updated_at = ? WHERE id = ?")
     .bind(now, jobId)
     .run();
 
   const generatorUrl = env.GENERATOR_URL?.trim();
   if (!generatorUrl) {
     await env.DB.prepare(
-      "UPDATE generation_jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
+      "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ?",
     )
       .bind("生成服务地址未配置", new Date().toISOString(), jobId)
       .run();
@@ -1011,7 +1107,7 @@ async function dispatchGeneration(message: Message<GenerationMessage>, env: Env)
     });
   } catch (error) {
     await env.DB.prepare(
-      "UPDATE generation_jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
+      "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ?",
     )
       .bind(`生成服务不可达：${String(error)}`.slice(0, 2000), new Date().toISOString(), jobId)
       .run();
@@ -1026,7 +1122,7 @@ async function dispatchGeneration(message: Message<GenerationMessage>, env: Env)
       if (typeof parsed.detail === "string") detail = parsed.detail;
     } catch { /* keep the safe response body */ }
     await env.DB.prepare(
-      "UPDATE generation_jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
+      "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ?",
     )
       .bind(`生成服务返回 ${response.status}：${detail}`, new Date().toISOString(), jobId)
       .run();
@@ -1042,7 +1138,7 @@ async function dispatchGeneration(message: Message<GenerationMessage>, env: Env)
     responseBody = (await response.json()) as { status?: unknown; result?: unknown };
   } catch {
     await env.DB.prepare(
-      "UPDATE generation_jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
+      "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ?",
     )
       .bind("生成服务返回格式错误", new Date().toISOString(), jobId)
       .run();
@@ -1054,7 +1150,7 @@ async function dispatchGeneration(message: Message<GenerationMessage>, env: Env)
     const result = responseBody.result;
     if (!result || typeof result !== "object" || Array.isArray(result)) {
       await env.DB.prepare(
-        "UPDATE generation_jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
+        "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ?",
       )
         .bind("生成服务缺少 result", new Date().toISOString(), jobId)
         .run();
@@ -1064,13 +1160,24 @@ async function dispatchGeneration(message: Message<GenerationMessage>, env: Env)
     const rawArtifacts = (result as { artifacts?: unknown }).artifacts;
     if (!Array.isArray(rawArtifacts)) {
       await env.DB.prepare(
-        "UPDATE generation_jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
+        "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ?",
       )
         .bind("生成服务返回的文书列表无效", new Date().toISOString(), jobId)
         .run();
       message.ack();
       return;
     }
+    const evidenceUpdates = Array.isArray((result as { evidence_updates?: unknown }).evidence_updates)
+      ? (result as { evidence_updates: unknown[] }).evidence_updates.flatMap((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+        const candidate = item as { id?: unknown; name?: unknown; source?: unknown; purpose?: unknown };
+        const id = typeof candidate.id === "string" ? candidate.id : "";
+        const name = typeof candidate.name === "string" ? candidate.name.trim().slice(0, 255) : "";
+        const source = typeof candidate.source === "string" ? candidate.source.trim().slice(0, 255) : "";
+        const purpose = typeof candidate.purpose === "string" ? candidate.purpose.trim().slice(0, 2000) : "";
+        return id && name && source && purpose ? [{ id, name, source, purpose }] : [];
+      })
+      : [];
     const artifacts = rawArtifacts.flatMap((item) => {
       if (!item || typeof item !== "object" || Array.isArray(item)) return [];
       const candidate = item as { kind?: unknown; filename?: unknown; object_key?: unknown };
@@ -1091,12 +1198,16 @@ async function dispatchGeneration(message: Message<GenerationMessage>, env: Env)
     const completedAt = new Date().toISOString();
     const statements = [
       env.DB.prepare(
-        "UPDATE generation_jobs SET status = 'completed', result_json = ?, updated_at = ? WHERE id = ?",
+        "UPDATE generation_jobs SET status = 'completed', stage = 'complete', progress = 100, result_json = ?, updated_at = ? WHERE id = ?",
       ).bind(JSON.stringify(result), completedAt, jobId),
       env.DB.prepare("DELETE FROM artifacts WHERE case_id = ?").bind(caseId),
       env.DB.prepare(
         "UPDATE cases SET status = 'generated', generation_count = generation_count + 1 WHERE id = ?",
       ).bind(caseId),
+      ...evidenceUpdates.map((item) =>
+        env.DB.prepare("UPDATE evidence SET name = ?, source = ?, purpose = ? WHERE id = ? AND case_id = ?")
+          .bind(item.name, item.source, item.purpose, item.id, caseId),
+      ),
       ...artifacts.map((artifact) =>
         env.DB.prepare(
           "INSERT INTO artifacts (id, case_id, filename, kind, object_key, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1230,6 +1341,11 @@ export default {
       return enqueueGeneration(request, env);
     }
 
+    const generationProgressMatch = url.pathname.match(/^\/api\/internal\/generation-jobs\/([^/]+)\/progress$/);
+    if (request.method === "POST" && generationProgressMatch) {
+      return updateGenerationProgress(request, env, decodeURIComponent(generationProgressMatch[1]));
+    }
+
     const generationInputMatch = url.pathname.match(/^\/api\/internal\/cases\/([^/]+)\/generation-input$/);
     if (request.method === "GET" && generationInputMatch) {
       return getGenerationInput(request, env, decodeURIComponent(generationInputMatch[1]));
@@ -1238,13 +1354,17 @@ export default {
     return json({ detail: "Cloudflare Worker API迁移中" }, { status: 501 });
   },
 
-  async queue(batch: MessageBatch<GenerationMessage>, env: Env): Promise<void> {
+  async queue(batch: MessageBatch<QueueMessage>, env: Env): Promise<void> {
     for (const message of batch.messages) {
-      await dispatchGeneration(message, env);
+      if (message.body.type === "evidence_analysis") {
+        await dispatchEvidenceAnalysis(message as Message<EvidenceAnalysisMessage>, env);
+      } else {
+        await dispatchGeneration(message as Message<GenerationMessage>, env);
+      }
     }
   },
 
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
     await purgeExpiredCases(env);
   },
-} satisfies ExportedHandler<Env, GenerationMessage>;
+} satisfies ExportedHandler<Env, QueueMessage>;

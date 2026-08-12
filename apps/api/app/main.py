@@ -23,6 +23,7 @@ from app.schemas import (
     ChatInput,
     ClaimCalculationInput,
     CreateCaseInput,
+    InternalEvidenceAnalysisInput,
     InternalGenerationJobInput,
     InternalCaseAnalysisInput,
     InternalOtpInput,
@@ -39,8 +40,9 @@ from app.services.case_analysis import CaseAnalyzer
 from app.services.generation import run_generation
 from app.services.llm import OpenAICompatibleExtractor, deep_merge
 from app.services.legal_research import YuandianLegalResearchProvider
-from app.services.remote_generation import RemoteGenerationError, fetch_worker_generation_input, run_remote_generation
-from app.services.storage import delete_if_managed, presigned_download, save_upload
+from app.services.evidence_analysis import analyze_material
+from app.services.remote_generation import RemoteGenerationError, _s3_stored_path, fetch_worker_generation_input, run_remote_generation
+from app.services.storage import delete_if_managed, materialize_for_processing, presigned_download, save_upload
 
 
 logger = logging.getLogger(__name__)
@@ -170,7 +172,7 @@ def create_app() -> FastAPI:
             worker_case = worker_payload.get("case") or {}
             if worker_case.get("id") != payload.case_id:
                 raise RemoteGenerationError("Worker返回的案件编号不一致")
-            result = run_remote_generation(worker_payload)
+            result = await run_remote_generation(worker_payload, payload.job_id)
         except RemoteGenerationError as exc:
             logger.exception("[GENERATION-ERROR] bridge failure")
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"生成服务桥接失败：{exc}") from exc
@@ -178,6 +180,38 @@ def create_app() -> FastAPI:
             logger.exception("[GENERATION-ERROR] document generation failure")
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "文书生成失败") from exc
         return {"status": "completed", "job_id": payload.job_id, "case_id": payload.case_id, "result": result}
+
+    @app.post("/internal/evidence-analysis", include_in_schema=False)
+    async def internal_evidence_analysis(
+        payload: InternalEvidenceAnalysisInput,
+        authorization: str | None = Header(default=None),
+    ):
+        expected = settings.generator_internal_token
+        if not expected or not secrets.compare_digest(authorization or "", f"Bearer {expected}"):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未授权")
+        processing_path = None
+        try:
+            worker_payload = await fetch_worker_generation_input(payload.case_id)
+            case = worker_payload.get("case") or {}
+            item = next(
+                (value for value in worker_payload.get("evidence") or [] if value.get("id") == payload.evidence_id),
+                None,
+            )
+            if not item:
+                raise RemoteGenerationError("证据不存在")
+            object_key = str(item.get("object_key") or "")
+            processing_path = materialize_for_processing(
+                _s3_stored_path(object_key), payload.case_id, payload.evidence_id
+            )
+            return await analyze_material(case=case, item=item, path=processing_path)
+        except RemoteGenerationError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+        except Exception as exc:
+            logger.exception("[EVIDENCE-ANALYSIS-ERROR]")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "材料读取或分析失败") from exc
+        finally:
+            if processing_path is not None:
+                delete_if_managed(str(processing_path))
 
     @app.post("/internal/case-analysis", include_in_schema=False)
     async def internal_case_analysis(

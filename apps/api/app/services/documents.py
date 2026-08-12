@@ -20,12 +20,6 @@ from pypdf import PdfReader, PdfWriter
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfgen import canvas
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.units import cm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from app.config import get_settings
 from app.domain.calculations import calculate_claim
@@ -151,6 +145,12 @@ def _party_text(data: dict[str, Any], role: str, prefix: str) -> list[str]:
 
 
 def _claim_lines(data: dict[str, Any], stage: str) -> list[str]:
+    drafted = (data.get("_ai_draft") or {}).get("claims") or []
+    if drafted:
+        lines = [str(item) for item in drafted]
+        if stage == "litigation" and not any("诉讼费" in item for item in lines):
+            lines.append("本案诉讼费用由被告承担。")
+        return lines
     claims = data.get("claims") or []
     if not claims:
         return ["[待填入：仲裁请求]" if stage == "arbitration" else "[待填入：诉讼请求]"]
@@ -171,6 +171,9 @@ def _claim_lines(data: dict[str, Any], stage: str) -> list[str]:
 
 
 def _fact_text(data: dict[str, Any], stage: str) -> list[str]:
+    drafted = (data.get("_ai_draft") or {}).get("facts_and_reasons") or []
+    if drafted:
+        return [str(item) for item in drafted]
     employment = data.get("employment_facts") or {}
     facts = [
         f"申请人/原告于{employment.get('start_date') or '[待填入：入职日期]'}入职，"
@@ -302,14 +305,22 @@ def _build_element_complaint(path: Path, payload: dict[str, Any]) -> None:
     document = Document()
     _configure_document(document)
     _title(document, "民事起诉状（劳动争议要素式）")
+    facts = _fact_text(data, "litigation")
+    arbitration = data.get("arbitration") or {}
+    arbitration_text = (
+        f"本案经{arbitration.get('committee')}审理，作出{arbitration.get('award_number')}裁决，"
+        f"原告于{arbitration.get('service_date')}收到裁决。"
+        if arbitration.get("committee") and arbitration.get("award_number") and arbitration.get("service_date")
+        else "\n".join(facts[2:4])
+    )
     rows = [
         ("一、当事人信息", ""),
         ("原告", "\n".join(_party_text(data, "initiating", "原告"))),
         ("被告", "\n".join(_party_text(data, "opposing", "被告"))),
         ("二、诉讼请求", "\n".join(f"{i}. {line}" for i, line in enumerate(_claim_lines(data, "litigation"), 1))),
-        ("三、劳动关系要素", "\n".join(_fact_text(data, "litigation")[:2])),
-        ("四、仲裁前置情况", "\n".join(_fact_text(data, "litigation")[2:4])),
-        ("五、事实、理由及依据", "\n".join(_fact_text(data, "litigation")[4:] or ["[待填入：事实、理由及依据]"])),
+        ("三、劳动关系要素", "\n".join(facts[:2])),
+        ("四、仲裁前置情况", arbitration_text),
+        ("五、事实、理由及依据", "\n".join(facts)),
         ("六、受诉法院", _get(data, "court", "管辖人民法院")),
     ]
     table = document.add_table(rows=len(rows), cols=2)
@@ -413,40 +424,28 @@ def _assemble_evidence(evidence: list[dict[str, Any]], path: Path) -> list[str]:
 
 
 def _build_catalog(path: Path, evidence: list[dict[str, Any]], page_ranges: list[str]) -> None:
-    try:
-        pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
-    except KeyError:
-        pass
-    document = SimpleDocTemplate(
-        str(path), pagesize=landscape(A4), leftMargin=1.5 * cm, rightMargin=1.5 * cm,
-        topMargin=1.5 * cm, bottomMargin=1.5 * cm, title="证据目录",
-    )
-    normal = ParagraphStyle("catalog", fontName="STSong-Light", fontSize=9, leading=13)
-    centered = ParagraphStyle("catalog-center", parent=normal, alignment=TA_CENTER)
-    title = ParagraphStyle("catalog-title", parent=centered, fontSize=18, leading=24, spaceAfter=12)
+    document = Document()
+    _configure_document(document, landscape=True)
+    _title(document, "证据目录")
     headers = ["证据编号", "证据名称", "来源", "证明目的", "页码"]
-    rows: list[list[Any]] = [[Paragraph(value, centered) for value in headers]]
+    table = document.add_table(rows=1, cols=5)
+    table.style = "Table Grid"
+    _set_table_geometry(table, [2.2, 5, 4.2, 11.5, 2.5])
+    for index, value in enumerate(headers):
+        _set_cell(table.cell(0, index), value, bold=True, center=True)
     for row_index, item in enumerate(evidence, start=1):
+        cells = table.add_row().cells
         values = [
             str(row_index),
-            item.get("name") or item.get("original_name") or f"证据{row_index}",
-            item.get("source") or "[待填入：来源]",
-            item.get("purpose") or "[待填入：证明目的]",
+            item.get("name") or "[待核实：证据名称]",
+            item.get("source") or "[待核实：来源]",
+            item.get("purpose") or "[待核实：证明目的]",
             page_ranges[row_index - 1],
         ]
-        rows.append([Paragraph(str(value), centered if index in {0, 4} else normal) for index, value in enumerate(values)])
-    table = Table(rows, colWidths=[2.2 * cm, 5 * cm, 4.2 * cm, 11.5 * cm, 2.5 * cm], repeatRows=1)
-    table.setStyle(TableStyle([
-        ("FONTNAME", (0, 0), (-1, -1), "STSong-Light"),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF6")),
-        ("GRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#64748B")),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-    ]))
-    document.build([Paragraph("证据目录", title), Spacer(1, 4), table])
+        for index, value in enumerate(values):
+            _set_cell(cells[index], str(value), center=index in {0, 4})
+    document.core_properties.title = "证据目录"
+    document.save(path)
 
 
 def build_case_package(
@@ -468,7 +467,10 @@ def build_case_package(
         _build_arbitration(target, payload)
         artifacts.append(GeneratedArtifact("pleading", target.name, target))
     else:
-        ordinary = case_dir / "01-民事起诉状.docx"
+        element = case_dir / "01A-民事起诉状（要素式）.docx"
+        _build_element_complaint(element, payload)
+        artifacts.append(GeneratedArtifact("pleading_element", element.name, element))
+        ordinary = case_dir / "01B-民事起诉状（普通式）.docx"
         _build_ordinary_complaint(ordinary, payload)
         artifacts.append(GeneratedArtifact("pleading", ordinary.name, ordinary))
 
@@ -476,7 +478,7 @@ def build_case_package(
     if evidence_items:
         evidence_path = case_dir / "03-证据材料.pdf"
         page_ranges = _assemble_evidence(evidence_items, evidence_path)
-    catalog = case_dir / "02-证据目录.pdf"
+    catalog = case_dir / "02-证据目录.docx"
     _build_catalog(catalog, evidence_items, page_ranges)
     artifacts.append(GeneratedArtifact("evidence_catalog", catalog.name, catalog))
     if evidence_items:

@@ -9,6 +9,17 @@ export interface EvidenceItem {
   purpose: string;
   size_bytes: number;
   status: string;
+  processing_stage: string;
+  processing_progress: number;
+  analysis?: Record<string, unknown>;
+}
+
+export interface GenerationJob {
+  id: string;
+  status: "queued" | "dispatched" | "running" | "completed" | "failed";
+  stage: string;
+  progress: number;
+  error?: string;
 }
 
 export interface Artifact {
@@ -57,6 +68,33 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
+}
+
+export function uploadEvidence(
+  caseId: string,
+  file: File,
+  consentCloudProcessing: boolean,
+  onProgress: (progress: number) => void,
+): Promise<EvidenceItem> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", `/api/cases/${caseId}/evidence`);
+    request.withCredentials = true;
+    request.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
+    });
+    request.addEventListener("load", () => {
+      let body: any = {};
+      try { body = JSON.parse(request.responseText || "{}"); } catch {}
+      if (request.status >= 200 && request.status < 300) resolve(body as EvidenceItem);
+      else reject(new Error(body.detail || "证据上传失败"));
+    });
+    request.addEventListener("error", () => reject(new Error("网络中断，证据上传失败")));
+    const form = new FormData();
+    form.append("file", file);
+    form.append("consent_cloud_processing", String(consentCloudProcessing));
+    request.send(form);
+  });
 }
 
 export function formatDate(value: string): string {

@@ -52,9 +52,13 @@ def test_release_v1_standard_cases_generate_the_expected_artifact_set(tmp_path: 
         )
 
         expected = (
-            {"01-劳动人事争议仲裁申请书.docx", "02-证据目录.pdf"}
+            {"01-劳动人事争议仲裁申请书.docx", "02-证据目录.docx"}
             if case["case_stage"] == "arbitration"
-            else {"01-民事起诉状.docx", "02-证据目录.pdf"}
+            else {
+                "01A-民事起诉状（要素式）.docx",
+                "01B-民事起诉状（普通式）.docx",
+                "02-证据目录.docx",
+            }
         )
         assert {artifact.filename for artifact in result.artifacts} == expected
         assert all(artifact.path.exists() for artifact in result.artifacts)

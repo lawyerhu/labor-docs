@@ -33,13 +33,13 @@ def test_litigation_package_with_missing_facts_contains_placeholders(tmp_path: P
     )
 
     names = {artifact.filename for artifact in result.artifacts}
-    assert names == {"01-民事起诉状.docx", "02-证据目录.pdf"}
+    assert names == {"01A-民事起诉状（要素式）.docx", "01B-民事起诉状（普通式）.docx", "02-证据目录.docx"}
     assert "03-证据材料.pdf" not in names
-    ordinary = tmp_path / "case-empty" / "01-民事起诉状.docx"
+    ordinary = tmp_path / "case-empty" / "01B-民事起诉状（普通式）.docx"
     assert "[待填入：原告名称]" in _all_text(ordinary)
-    catalog = PdfReader(tmp_path / "case-empty" / "02-证据目录.pdf")
-    assert len(catalog.pages) == 1
-    assert float(catalog.pages[0].mediabox.width) > float(catalog.pages[0].mediabox.height)
+    catalog = Document(tmp_path / "case-empty" / "02-证据目录.docx")
+    assert len(catalog.tables) == 1
+    assert catalog.sections[0].page_width > catalog.sections[0].page_height
 
 
 def test_evidence_package_uses_actual_files_and_continuous_pages(tmp_path: Path):
@@ -63,10 +63,32 @@ def test_evidence_package_uses_actual_files_and_continuous_pages(tmp_path: Path)
     reader = PdfReader(evidence)
     assert len(reader.pages) == 3
     assert len(reader.outline) == 2
-    catalog = PdfReader(tmp_path / "case-evidence" / "02-证据目录.pdf")
-    assert len(catalog.pages) == 1
-    assert float(catalog.pages[0].mediabox.width) > float(catalog.pages[0].mediabox.height)
+    catalog = Document(tmp_path / "case-evidence" / "02-证据目录.docx")
+    assert len(catalog.tables[0].rows) == 3
+    assert catalog.sections[0].page_width > catalog.sections[0].page_height
     assert result.readiness == "formal_with_placeholders"
+
+
+def test_litigation_package_uses_ai_draft_in_both_complaints(tmp_path: Path):
+    data = {
+        "_ai_draft": {
+            "claims": ["判令被告向原告支付拖欠工资人民币12,000元。"],
+            "facts_and_reasons": ["原告与被告存在劳动关系，被告尚欠原告工资人民币12,000元。"],
+        }
+    }
+    result = build_case_package(
+        case_id="case-ai-draft",
+        payload={"case_stage": "litigation", "party_side": "worker", "data": data},
+        evidence_items=[],
+        output_dir=tmp_path,
+    )
+
+    assert len(result.artifacts) == 3
+    case_dir = tmp_path / "case-ai-draft"
+    for filename in ("01A-民事起诉状（要素式）.docx", "01B-民事起诉状（普通式）.docx"):
+        text = _all_text(case_dir / filename)
+        assert "拖欠工资人民币12,000元" in text
+        assert "[待填入：诉讼请求]" not in text
 
 
 def test_evidence_package_converts_images_to_continuous_pdf(tmp_path: Path):
