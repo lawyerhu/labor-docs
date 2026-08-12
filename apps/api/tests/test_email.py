@@ -52,3 +52,29 @@ def test_send_otp_email_requires_brevo_configuration(monkeypatch):
 
     with pytest.raises(HTTPException):
         email.send_otp_email("recipient@example.com", "123456")
+
+
+def test_send_otp_email_accepts_accidentally_pasted_env_lines(monkeypatch):
+    settings = SimpleNamespace(
+        app_env="production",
+        brevo_api_key="BREVO_API_KEY=xkeysib-test",
+        brevo_sender_email="BREVO_SENDER_EMAIL=sender@example.com",
+        brevo_sender_name="劳动文书助手",
+    )
+    calls = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+    def fake_post(url, **kwargs):
+        calls["kwargs"] = kwargs
+        return Response()
+
+    monkeypatch.setattr(email, "get_settings", lambda: settings)
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    email.send_otp_email("recipient@example.com", "123456")
+
+    assert calls["kwargs"]["headers"]["api-key"] == "xkeysib-test"
+    assert calls["kwargs"]["json"]["sender"]["email"] == "sender@example.com"
