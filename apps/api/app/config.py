@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     antivirus_required: bool = False
     resend_api_key: str | None = None
     registration_email_from: str | None = None
+    test_admin_enabled: bool = False
+    test_admin_email: str | None = None
+    test_admin_password: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

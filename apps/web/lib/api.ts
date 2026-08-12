@@ -32,6 +32,7 @@ export interface CaseRecord {
   unverified_law: string[];
   evidence_gaps: string[];
   generation_count: number;
+  unlimited_generation: boolean;
   created_at: string;
   expires_at: string;
   evidence?: EvidenceItem[];
@@ -77,4 +78,3 @@ export function setAt(data: Record<string, any>, path: string, value: any): Reco
   current[parts.at(-1)!] = value;
   return result;
 }
-

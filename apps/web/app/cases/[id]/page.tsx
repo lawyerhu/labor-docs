@@ -114,8 +114,8 @@ export default function CaseWorkspacePage() {
       <div className="generation-card">
         <div><div className="eyebrow"><span /> 直接生成</div><h2>三份可下载材料</h2></div>
         <div className="output-preview"><OutputRow name={record.case_stage === "litigation" ? "民事起诉状" : "劳动人事争议仲裁申请书"} type="DOCX" /><OutputRow name="证据目录（横向五列）" type="PDF" /><OutputRow name="证据材料（连续页码）" type="PDF" muted={!record.evidence?.length} /></div>
-        <button className="button button-primary button-large generate-button" onClick={generate} disabled={busy || !hasAnalysis || needsFollowUp || record.access_status === "locked" || record.generation_count >= 3}>{busy ? <><LoaderCircle className="spin" /> 正在生成…</> : <><Sparkles size={19} /> 生成正式材料</>}<span>{record.generation_count}/3 次</span></button>
-        {record.access_status === "locked" && <div className="form-error">该案件需要兑换码后才能生成。</div>}
+        <button className="button button-primary button-large generate-button" onClick={generate} disabled={busy || !hasAnalysis || needsFollowUp || (record.access_status === "locked" && !record.unlimited_generation) || (!record.unlimited_generation && record.generation_count >= 3)}>{busy ? <><LoaderCircle className="spin" /> 正在生成…</> : <><Sparkles size={19} /> 生成正式材料</>}<span>{record.unlimited_generation ? `${record.generation_count} 次 · 不限量` : `${record.generation_count}/3 次`}</span></button>
+        {record.access_status === "locked" && !record.unlimited_generation && <div className="form-error">该案件需要兑换码后才能生成。</div>}
         {!!record.artifacts?.length && <div className="downloads">{record.artifacts.map((artifact) => <a className="download-row" href={`/api/cases/${record.id}/artifacts/${artifact.id}`} key={artifact.id}><FileText size={19} /><span><strong>{artifact.filename}</strong><small>点击下载</small></span><Download size={18} /></a>)}</div>}
         <div className="legal-note"><Info size={17} /><p>元典检索用于核验管辖线索、请求权依据和相似案例。未核验内容不会被写成确定法条或案例结论。</p></div>
       </div>

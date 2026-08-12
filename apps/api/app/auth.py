@@ -17,6 +17,29 @@ def _hash(value: str) -> str:
     return hashlib.sha256(f"{settings.session_secret}:{value}".encode()).hexdigest()
 
 
+def is_test_admin_email(email: str) -> bool:
+    settings = get_settings()
+    configured = (settings.test_admin_email or "").strip().lower()
+    return bool(settings.test_admin_enabled and configured and email.strip().lower() == configured)
+
+
+def is_test_admin(user: User) -> bool:
+    return is_test_admin_email(user.email)
+
+
+def authenticate_test_admin(email: str, password: str) -> bool:
+    settings = get_settings()
+    configured_email = (settings.test_admin_email or "").strip().lower()
+    configured_password = settings.test_admin_password or ""
+    return bool(
+        settings.test_admin_enabled
+        and configured_email
+        and configured_password
+        and secrets.compare_digest(email.strip().lower(), configured_email)
+        and secrets.compare_digest(password, configured_password)
+    )
+
+
 def issue_otp(db: Session, email: str) -> str:
     window_start = datetime.now(timezone.utc) - timedelta(minutes=15)
     recent = db.scalar(select(func.count(OTPCode.id)).where(OTPCode.email == email.lower(), OTPCode.created_at >= window_start)) or 0

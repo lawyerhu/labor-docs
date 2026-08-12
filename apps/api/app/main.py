@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user, issue_otp, set_session_cookie, verify_otp
+from app.auth import authenticate_test_admin, get_current_user, is_test_admin, issue_otp, set_session_cookie, verify_otp
 from app.config import get_settings
 from app.database import Base, engine, get_db
 from app.domain.calculations import calculate_claim
@@ -27,6 +27,7 @@ from app.schemas import (
     InternalCaseAnalysisInput,
     InternalOtpInput,
     LegalSearchInput,
+    PasswordLoginInput,
     RedeemInput,
     RequestCodeInput,
     UpdateCaseInput,
@@ -51,6 +52,7 @@ def _aware(value: datetime) -> datetime:
 
 def _case_payload(case: CaseRecord) -> dict:
     readiness = assess_readiness({"case_stage": case.case_stage, "party_side": case.party_side, "data": case.data})
+    unlimited_generation = is_test_admin(case.user) if case.user else False
     return {
         "id": case.id,
         "title": case.title,
@@ -60,6 +62,7 @@ def _case_payload(case: CaseRecord) -> dict:
         "access_status": case.access_status,
         "data": case.data or {},
         "generation_count": case.generation_count,
+        "unlimited_generation": unlimited_generation,
         "generation_version": case.generation_version,
         "created_at": case.created_at,
         "expires_at": case.expires_at,
@@ -205,6 +208,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/auth/request-code")
     def request_code(payload: RequestCodeInput, db: Session = Depends(get_db)):
+        if settings.test_admin_enabled and settings.app_env != "test":
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "当前仅开放测试管理员登录")
         code = issue_otp(db, str(payload.email))
         send_otp_email(str(payload.email), code)
         response = {"message": "验证码已发送，有效期10分钟"}
@@ -214,9 +219,27 @@ def create_app() -> FastAPI:
 
     @app.post("/api/auth/verify")
     def verify_code(payload: VerifyCodeInput, response: Response, db: Session = Depends(get_db)):
+        if settings.test_admin_enabled and settings.app_env != "test":
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "当前仅开放测试管理员登录")
         user = verify_otp(db, str(payload.email), payload.code)
         set_session_cookie(response, user)
         return {"id": user.id, "email": user.email}
+
+    @app.post("/api/auth/login")
+    def password_login(payload: PasswordLoginInput, response: Response, db: Session = Depends(get_db)):
+        if not settings.test_admin_enabled:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "当前仅开放测试管理员登录")
+        email = str(payload.email).lower()
+        if not authenticate_test_admin(email, payload.password):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号或密码错误")
+        user = db.scalar(select(User).where(User.email == email))
+        if not user:
+            user = User(email=email, free_case_used=True)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        set_session_cookie(response, user)
+        return {"id": user.id, "email": user.email, "unlimited_generation": True}
 
     @app.post("/api/auth/logout", status_code=204)
     def logout(response: Response):
@@ -224,7 +247,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/auth/me")
     def me(user: User = Depends(get_current_user)):
-        return {"id": user.id, "email": user.email}
+        return {"id": user.id, "email": user.email, "unlimited_generation": is_test_admin(user)}
 
     @app.get("/api/cases")
     def list_cases(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -233,13 +256,14 @@ def create_app() -> FastAPI:
 
     @app.post("/api/cases", status_code=201)
     def create_case(payload: CreateCaseInput, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        unlimited_generation = is_test_admin(user)
         first_case_free = not user.free_case_used
         case = CaseRecord(
             user_id=user.id,
             title=payload.title,
             case_stage=payload.case_stage,
             party_side=payload.party_side,
-            access_status="free" if first_case_free else "locked",
+            access_status="free" if first_case_free or unlimited_generation else "locked",
             expires_at=datetime.now(timezone.utc) + timedelta(days=30),
             data={"conversation": []},
         )
@@ -371,9 +395,10 @@ def create_app() -> FastAPI:
     @app.post("/api/cases/{case_id}/generate")
     def generate(case_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         case = _owned_case(db, case_id, user)
-        if case.access_status == "locked":
+        unlimited_generation = is_test_admin(user)
+        if case.access_status == "locked" and not unlimited_generation:
             raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, "请先使用兑换码解锁该案件")
-        if case.generation_count >= 3:
+        if case.generation_count >= 3 and not unlimited_generation:
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "本案件最多成功生成3次")
         case.status = "generating"
         if settings.app_env == "production":

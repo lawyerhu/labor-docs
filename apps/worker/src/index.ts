@@ -14,11 +14,27 @@ interface Env {
   GENERATOR_AUTH_TOKEN?: string;
   INTERNAL_API_TOKEN?: string;
   SESSION_SECRET?: string;
+  TEST_ADMIN_ENABLED?: string;
+  TEST_ADMIN_EMAIL?: string;
+  TEST_ADMIN_PASSWORD?: string;
 }
 
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
-type PublicUser = { id: string; email: string };
+type PublicUser = { id: string; email: string; unlimited_generation?: boolean };
+
+function testAdminOnly(env: Env): boolean {
+  return env.TEST_ADMIN_ENABLED?.trim().toLowerCase() === "true";
+}
+
+function isTestAdminEmail(env: Env, email: string): boolean {
+  const configured = normalizeEmail(env.TEST_ADMIN_EMAIL);
+  return testAdminOnly(env) && Boolean(configured && configured === email.trim().toLowerCase());
+}
+
+function isTestAdmin(env: Env, user: PublicUser): boolean {
+  return isTestAdminEmail(env, user.email);
+}
 
 function bytesToHex(bytes: Uint8Array): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -148,7 +164,7 @@ async function currentUser(request: Request, env: Env): Promise<PublicUser | nul
   const session = await readSessionToken(token, secret);
   if (!session) return null;
   const user = await env.DB.prepare("SELECT id, email FROM users WHERE id = ?").bind(session.id).first<PublicUser>();
-  return user ?? null;
+  return user ? { ...user, unlimited_generation: isTestAdmin(env, user) } : null;
 }
 
 type EmailSendResult = { ok: true } | { ok: false; detail: string };
@@ -209,6 +225,7 @@ async function requestCaseAnalysis(env: Env, payload: Record<string, unknown>): 
 }
 
 async function requestAuthCode(request: Request, env: Env): Promise<Response> {
+  if (testAdminOnly(env)) return json({ detail: "当前仅开放测试管理员登录" }, { status: 503 });
   const secret = env.SESSION_SECRET?.trim();
   if (!secret) return json({ detail: "登录服务尚未配置" }, { status: 503 });
   let body: { email?: unknown };
@@ -245,6 +262,7 @@ async function requestAuthCode(request: Request, env: Env): Promise<Response> {
 }
 
 async function verifyAuthCode(request: Request, env: Env): Promise<Response> {
+  if (testAdminOnly(env)) return json({ detail: "当前仅开放测试管理员登录" }, { status: 503 });
   const secret = env.SESSION_SECRET?.trim();
   if (!secret) return json({ detail: "登录服务尚未配置" }, { status: 503 });
   let body: { email?: unknown; code?: unknown };
@@ -292,6 +310,7 @@ function passwordValue(value: unknown): string | null {
 }
 
 async function requestRegistrationCode(request: Request, env: Env): Promise<Response> {
+  if (testAdminOnly(env)) return json({ detail: "当前仅开放测试管理员登录" }, { status: 503 });
   const secret = env.SESSION_SECRET?.trim();
   if (!secret) return json({ detail: "登录服务尚未配置" }, { status: 503 });
   let body: { email?: unknown };
@@ -331,6 +350,7 @@ async function requestRegistrationCode(request: Request, env: Env): Promise<Resp
 }
 
 async function registerPassword(request: Request, env: Env): Promise<Response> {
+  if (testAdminOnly(env)) return json({ detail: "当前仅开放测试管理员登录" }, { status: 503 });
   const secret = env.SESSION_SECRET?.trim();
   if (!secret) return json({ detail: "登录服务尚未配置" }, { status: 503 });
   let body: PasswordAuthBody;
@@ -392,13 +412,30 @@ async function loginPassword(request: Request, env: Env): Promise<Response> {
   const password = typeof body.password === "string" ? body.password : "";
   if (!email || password.length < 1 || password.length > 128) return json({ detail: "邮箱或密码不正确" }, { status: 401 });
 
+  const adminEmail = normalizeEmail(env.TEST_ADMIN_EMAIL);
+  const adminPassword = env.TEST_ADMIN_PASSWORD ?? "";
+  if (testAdminOnly(env) && adminEmail && adminPassword && email === adminEmail && constantTimeEqual(password, adminPassword)) {
+    const now = new Date().toISOString();
+    let user = await env.DB.prepare("SELECT id, email FROM users WHERE email = ?").bind(email).first<PublicUser>();
+    if (!user) {
+      const id = crypto.randomUUID();
+      await env.DB.prepare("INSERT INTO users (id, email, created_at) VALUES (?, ?, ?)").bind(id, email, now).run();
+      user = { id, email };
+    }
+    const publicUser = { ...user, unlimited_generation: true };
+    const token = await createSessionToken(secret, publicUser);
+    return json(publicUser, { headers: { "Set-Cookie": sessionCookie(token) } });
+  }
+
+  if (testAdminOnly(env)) return json({ detail: "邮箱或密码不正确" }, { status: 401 });
+
   const user = await env.DB.prepare("SELECT id, email, password_hash, email_verified FROM users WHERE email = ?").bind(email).first<{ id: string; email: string; password_hash: string | null; email_verified: number }>();
   if (!user?.password_hash || user.email_verified !== 1 || !(await verifyPassword(password, user.password_hash))) {
     return json({ detail: "邮箱或密码不正确" }, { status: 401 });
   }
   const publicUser = { id: user.id, email: user.email };
   const token = await createSessionToken(secret, publicUser);
-  return json(publicUser, { headers: { "Set-Cookie": sessionCookie(token) } });
+  return json({ ...publicUser, unlimited_generation: false }, { headers: { "Set-Cookie": sessionCookie(token) } });
 }
 
 function json(data: unknown, init: ResponseInit = {}): Response {
@@ -515,7 +552,7 @@ async function ownedCase(request: Request, env: Env, caseId: string): Promise<{ 
   return { user, row };
 }
 
-async function casePayload(env: Env, row: CaseRow) {
+async function casePayload(env: Env, row: CaseRow, user?: PublicUser) {
   const data = parseCaseData(row.data_json);
   const readiness = readinessFor(row, data);
   const [evidence, artifacts] = await Promise.all([
@@ -535,6 +572,7 @@ async function casePayload(env: Env, row: CaseRow) {
     access_status: row.access_status,
     data,
     generation_count: row.generation_count,
+    unlimited_generation: user ? isTestAdmin(env, user) : false,
     generation_version: row.generation_version,
     created_at: row.created_at,
     expires_at: row.expires_at,
@@ -550,7 +588,7 @@ async function listCases(request: Request, env: Env): Promise<Response> {
   const rows = await env.DB.prepare(
     "SELECT id, user_id, title, case_stage, party_side, status, access_status, data_json, generation_count, generation_version, created_at, expires_at FROM cases WHERE user_id = ? ORDER BY created_at DESC",
   ).bind(user.id).all<CaseRow>();
-  return json(await Promise.all(rows.results.map((row) => casePayload(env, row))));
+  return json(await Promise.all(rows.results.map((row) => casePayload(env, row, user))));
 }
 
 async function createCase(request: Request, env: Env): Promise<Response> {
@@ -572,7 +610,7 @@ async function createCase(request: Request, env: Env): Promise<Response> {
   const title = typeof body.title === "string" && body.title.trim() ? body.title.trim().slice(0, 200) : "劳动争议案件";
 
   const entitlement = await env.DB.prepare("SELECT free_case_used FROM users WHERE id = ?").bind(user.id).first<{ free_case_used: number }>();
-  const accessStatus = Number(entitlement?.free_case_used ?? 0) === 0 ? "free" : "locked";
+  const accessStatus = Number(entitlement?.free_case_used ?? 0) === 0 || isTestAdmin(env, user) ? "free" : "locked";
   const now = new Date().toISOString();
   const row: CaseRow = {
     id: crypto.randomUUID(), user_id: user.id, title, case_stage: stage, party_side: side,
@@ -589,7 +627,7 @@ async function createCase(request: Request, env: Env): Promise<Response> {
     ).bind(row.id, row.user_id, row.title, row.case_stage, row.party_side, row.status, row.access_status, row.data_json, row.generation_count, row.generation_version, row.created_at, row.expires_at),
     env.DB.prepare("UPDATE users SET free_case_used = 1 WHERE id = ?").bind(user.id),
   ]);
-  return json(await casePayload(env, row), { status: 201 });
+  return json(await casePayload(env, row, user), { status: 201 });
 }
 
 async function updateCase(request: Request, env: Env, caseId: string): Promise<Response> {
@@ -606,7 +644,7 @@ async function updateCase(request: Request, env: Env, caseId: string): Promise<R
   await env.DB.prepare("UPDATE cases SET title = ?, data_json = ?, status = 'ready_to_generate' WHERE id = ? AND user_id = ?")
     .bind(title, JSON.stringify(data), caseId, owned.user.id).run();
   const row = { ...owned.row, title, data_json: JSON.stringify(data), status: "ready_to_generate" };
-  return json(await casePayload(env, row));
+  return json(await casePayload(env, row, owned.user));
 }
 
 async function chatCase(request: Request, env: Env, caseId: string): Promise<Response> {
@@ -721,6 +759,10 @@ async function deleteEvidence(request: Request, env: Env, caseId: string, eviden
 async function generateCase(request: Request, env: Env, caseId: string): Promise<Response> {
   const owned = await ownedCase(request, env, caseId);
   if (owned instanceof Response) return owned;
+  if (isTestAdmin(env, owned.user)) {
+    owned.row.access_status = "free";
+    owned.row.generation_count = 0;
+  }
   if (owned.row.access_status === "locked") return json({ detail: "请先使用兑换码解锁该案件" }, { status: 402 });
   if (owned.row.generation_count >= 3) return json({ detail: "本案件最多成功生成3次" }, { status: 429 });
   const running = await env.DB.prepare("SELECT id FROM generation_jobs WHERE case_id = ? AND status IN ('queued', 'running', 'dispatched') LIMIT 1")
@@ -804,19 +846,24 @@ async function enqueueGeneration(request: Request, env: Env): Promise<Response> 
     return json({ detail: "缺少 case_id" }, { status: 400 });
   }
 
-  const existingCase = await env.DB.prepare("SELECT id, generation_count, access_status, expires_at FROM cases WHERE id = ?")
+  const existingCase = await env.DB.prepare("SELECT c.id, c.generation_count, c.access_status, c.expires_at, u.email FROM cases c JOIN users u ON u.id = c.user_id WHERE c.id = ?")
     .bind(caseId)
-    .first<{ id: string; generation_count: number; access_status: string; expires_at: string }>();
+    .first<{ id: string; generation_count: number; access_status: string; expires_at: string; email: string }>();
   if (!existingCase) {
     return json({ detail: "案件不存在" }, { status: 404 });
   }
   if (new Date(existingCase.expires_at).getTime() <= Date.now()) {
     return json({ detail: "案件已经到期" }, { status: 410 });
   }
-  if (existingCase.access_status === "locked") {
+  const unlimited = isTestAdminEmail(env, existingCase.email);
+  if (unlimited) {
+    existingCase.access_status = "free";
+    existingCase.generation_count = 0;
+  }
+  if (!unlimited && existingCase.access_status === "locked") {
     return json({ detail: "请先使用兑换码解锁该案件" }, { status: 402 });
   }
-  if (existingCase.generation_count >= 3) {
+  if (!unlimited && existingCase.generation_count >= 3) {
     return json({ detail: "本案件最多成功生成3次" }, { status: 429 });
   }
   const runningJob = await env.DB.prepare(
@@ -1161,7 +1208,7 @@ export default {
       const subpath = caseMatch[2] ?? "";
       if (request.method === "GET" && !subpath) {
         const owned = await ownedCase(request, env, caseId);
-        return owned instanceof Response ? owned : json(await casePayload(env, owned.row));
+        return owned instanceof Response ? owned : json(await casePayload(env, owned.row, owned.user));
       }
       if (request.method === "PATCH" && !subpath) return updateCase(request, env, caseId);
       if (request.method === "POST" && subpath === "chat") return chatCase(request, env, caseId);

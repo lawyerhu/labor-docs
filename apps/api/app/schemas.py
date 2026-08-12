@@ -15,6 +15,11 @@ class VerifyCodeInput(RequestCodeInput):
     code: str = Field(min_length=6, max_length=6)
 
 
+class PasswordLoginInput(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+
+
 class CreateCaseInput(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     case_stage: CaseStage

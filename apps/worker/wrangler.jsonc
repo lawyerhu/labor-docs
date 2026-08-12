@@ -13,7 +13,9 @@
 	},
 	"vars": {
 		"ENVIRONMENT": "production",
-		"GENERATOR_URL": "https://labor-docs-generator.onrender.com"
+		"GENERATOR_URL": "https://labor-docs-generator.onrender.com",
+		"TEST_ADMIN_ENABLED": "true",
+		"TEST_ADMIN_EMAIL": "1149781059@qq.com"
 	},
 	"d1_databases": [
 		{
