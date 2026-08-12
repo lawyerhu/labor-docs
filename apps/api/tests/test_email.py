@@ -81,6 +81,14 @@ def test_send_otp_email_accepts_accidentally_pasted_env_lines(monkeypatch):
     ("status_code", "body", "expected"),
     [
         (401, {"message": "Key not found"}, "API 密钥无效"),
+        (
+            403,
+            {
+                "code": "permission_denied",
+                "message": "Unable to send email. Your SMTP account is not yet activated.",
+            },
+            "事务邮件账户尚未激活",
+        ),
         (400, {"message": "sender not valid"}, "发件人邮箱未验证"),
         (429, {"message": "rate limit"}, "额度或频率"),
     ],

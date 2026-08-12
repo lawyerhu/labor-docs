@@ -61,12 +61,18 @@ def send_otp_email(recipient: str, code: str) -> None:
             error_code[:80],
             error_message[:300],
         )
-        if response.status_code in {401, 403}:
+        normalized_error = f"{error_code} {error_message}".lower()
+        if response.status_code == 403 and (
+            "not yet activated" in normalized_error
+            or "permission_denied" in normalized_error
+        ):
+            detail = "Brevo 事务邮件账户尚未激活，请先联系 Brevo 支持申请开通"
+        elif response.status_code in {401, 403}:
             detail = "Brevo API 密钥无效或没有邮件发送权限"
         elif response.status_code == 429:
             detail = "Brevo 邮件发送额度或频率已达到限制"
         elif response.status_code == 400 and any(
-            word in f"{error_code} {error_message}".lower() for word in ("sender", "from", "email")
+            word in normalized_error for word in ("sender", "from", "email")
         ):
             detail = "Brevo 发件人邮箱未验证或配置格式不正确"
         else:
