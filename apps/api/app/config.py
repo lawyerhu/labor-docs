@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     openai_base_url: str | None = None
     openai_api_key: str | None = None
     openai_model: str | None = None
+    openai_wire_api: str = "chat"
     yuandian_endpoint: str | None = None
     yuandian_token: str | None = None
     yuandian_law_mcp_url: str = "https://open.chineselaw.com/mcp/law/stream"

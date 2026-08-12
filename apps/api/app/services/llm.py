@@ -1,11 +1,11 @@
 import json
 from typing import Any
 
-import httpx
 from pydantic import ValidationError
 
 from app.config import get_settings
 from app.schemas import ExtractionPatch
+from app.services.openai_compat import complete_json
 
 
 SYSTEM_PROMPT = """你是劳动争议案情信息提取器。只输出JSON，不作法律结论，不编造事实。
@@ -18,21 +18,11 @@ class OpenAICompatibleExtractor:
         settings = get_settings()
         if not settings.openai_base_url or not settings.openai_api_key or not settings.openai_model:
             return {}
-        url = settings.openai_base_url.rstrip("/") + "/chat/completions"
-        body = {
-            "model": settings.openai_model,
-            "temperature": 0,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps({"current_data": current_data, "message": message}, ensure_ascii=False)},
-            ],
-        }
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(url, headers={"Authorization": f"Bearer {settings.openai_api_key}"}, json=body)
-            response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
+        parsed = await complete_json(
+            system=SYSTEM_PROMPT,
+            user=json.dumps({"current_data": current_data, "message": message}, ensure_ascii=False),
+            timeout=30,
+        )
         try:
             return ExtractionPatch.model_validate(parsed).model_dump(exclude_none=True)
         except ValidationError:

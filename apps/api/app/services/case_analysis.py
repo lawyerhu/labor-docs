@@ -5,10 +5,9 @@ import json
 import re
 from typing import Any
 
-import httpx
-
 from app.config import get_settings
 from app.services.legal_research import YuandianLegalResearchProvider
+from app.services.openai_compat import complete_json
 
 
 SENSITIVE_TERMS = ("姓名", "身份证", "联系方式", "手机号", "家庭住址", "详细地址", "信用代码", "法定代表人")
@@ -99,24 +98,11 @@ class CaseAnalyzer:
 元典结果未核验时不得生成精确法条、案例号或企业信息，应在 legal_analysis 中标记待核验。
 legal_analysis 输出一段简明中文，说明请求权、管辖线索、类案倾向及主要举证风险。data_patch 只使用这些字段：employment_facts、arbitration、court、claims、legal_basis、evidence_gaps；legal_basis 每项包含 citation，且只有原文出现在已核验法条结果中才能标 verified=true。"""
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                response = await client.post(
-                    settings.openai_base_url.rstrip("/") + "/chat/completions",
-                    headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-                    json={
-                        "model": settings.openai_model,
-                        "temperature": 0,
-                        "response_format": {"type": "json_object"},
-                        "messages": [
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
-                        ],
-                    },
-                )
-                response.raise_for_status()
-            parsed = json.loads(response.json()["choices"][0]["message"]["content"])
-            if not isinstance(parsed, dict):
-                raise ValueError("模型输出不是对象")
+            parsed = await complete_json(
+                system=system,
+                user=json.dumps(prompt, ensure_ascii=False),
+                timeout=60,
+            )
             questions = parsed.get("follow_up_questions") if round_number == 1 else []
             parsed["follow_up_questions"] = [
                 str(item) for item in (questions or [])
