@@ -2,11 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from app.config import get_settings
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ModelProvider:
+    name: str
+    base_url: str
+    api_key: str
+    model: str
+    wire_api: str
 
 
 def _content_text(value: Any) -> str:
@@ -67,23 +81,41 @@ def parse_json_text(text: str) -> dict[str, Any]:
 RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
-async def complete_json(*, system: str, user: str, timeout: float = 60, attempts: int = 3) -> dict[str, Any]:
-    settings = get_settings()
-    if not settings.openai_base_url or not settings.openai_api_key or not settings.openai_model:
-        raise RuntimeError("大模型未配置")
+def _configured_provider(settings: Any, prefix: str, name: str) -> ModelProvider | None:
+    base_url = getattr(settings, f"{prefix}_base_url", None)
+    api_key = getattr(settings, f"{prefix}_api_key", None)
+    model = getattr(settings, f"{prefix}_model", None)
+    if not base_url or not api_key or not model:
+        return None
+    return ModelProvider(
+        name=name,
+        base_url=str(base_url),
+        api_key=str(api_key),
+        model=str(model),
+        wire_api=str(getattr(settings, f"{prefix}_wire_api", "chat")),
+    )
 
-    wire_api = settings.openai_wire_api.strip().lower()
+
+async def _complete_with_provider(
+    provider: ModelProvider,
+    *,
+    system: str,
+    user: str,
+    timeout: float,
+    attempts: int,
+) -> dict[str, Any]:
+    wire_api = provider.wire_api.strip().lower()
     if wire_api == "responses":
-        url = settings.openai_base_url.rstrip("/") + "/responses"
+        url = provider.base_url.rstrip("/") + "/responses"
         body: dict[str, Any] = {
-            "model": settings.openai_model,
+            "model": provider.model,
             "instructions": system,
             "input": user,
         }
     elif wire_api in {"chat", "chat_completions", "chat-completions"}:
-        url = settings.openai_base_url.rstrip("/") + "/chat/completions"
+        url = provider.base_url.rstrip("/") + "/chat/completions"
         body = {
-            "model": settings.openai_model,
+            "model": provider.model,
             "temperature": 0,
             "response_format": {"type": "json_object"},
             "messages": [
@@ -92,7 +124,7 @@ async def complete_json(*, system: str, user: str, timeout: float = 60, attempts
             ],
         }
     else:
-        raise RuntimeError("OPENAI_WIRE_API 只能是 chat 或 responses")
+        raise RuntimeError(f"{provider.name} WIRE_API 只能是 chat 或 responses")
 
     last_error = "模型接口失败"
     for attempt in range(1, max(attempts, 1) + 1):
@@ -100,7 +132,7 @@ async def complete_json(*, system: str, user: str, timeout: float = 60, attempts
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     url,
-                    headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                    headers={"Authorization": f"Bearer {provider.api_key}"},
                     json=body,
                 )
         except httpx.TimeoutException as exc:
@@ -119,3 +151,34 @@ async def complete_json(*, system: str, user: str, timeout: float = 60, attempts
                 raise RuntimeError(last_error)
         await asyncio.sleep(min(8, 2 * attempt))
     raise RuntimeError(last_error)
+
+
+async def complete_json(*, system: str, user: str, timeout: float = 60, attempts: int = 3) -> dict[str, Any]:
+    settings = get_settings()
+    primary = _configured_provider(settings, "openai", "主模型")
+    if primary is None:
+        raise RuntimeError("大模型未配置")
+
+    try:
+        return await _complete_with_provider(
+            primary,
+            system=system,
+            user=user,
+            timeout=timeout,
+            attempts=attempts,
+        )
+    except RuntimeError as primary_error:
+        fallback = _configured_provider(settings, "grok", "Grok 备用模型")
+        if fallback is None:
+            raise
+        logger.warning("[MODEL-FAILOVER] primary=%s fallback=%s reason=%s", primary.name, fallback.name, primary_error)
+        try:
+            return await _complete_with_provider(
+                fallback,
+                system=system,
+                user=user,
+                timeout=timeout,
+                attempts=attempts,
+            )
+        except RuntimeError as fallback_error:
+            raise RuntimeError(f"主模型失败：{primary_error}；Grok 备用模型失败：{fallback_error}") from fallback_error

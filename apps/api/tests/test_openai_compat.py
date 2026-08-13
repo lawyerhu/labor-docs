@@ -155,3 +155,52 @@ def test_complete_json_maps_timeout(monkeypatch):
         assert str(exc) == "模型接口超时（12秒）"
     else:
         raise AssertionError("expected RuntimeError")
+
+
+def test_complete_json_falls_back_to_grok(monkeypatch):
+    class FakeSettings:
+        openai_base_url = "https://primary.test/v1"
+        openai_api_key = "primary-key"
+        openai_model = "primary-model"
+        openai_wire_api = "responses"
+        grok_base_url = "https://fallback.test/v1"
+        grok_api_key = "fallback-key"
+        grok_model = "grok-model"
+        grok_wire_api = "chat"
+
+    class FakeResponse:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    requests = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, *, headers, json):
+            requests.append((url, headers, json))
+            if url == "https://primary.test/v1/responses":
+                return FakeResponse(503)
+            return FakeResponse(200, {"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+    monkeypatch.setattr(openai_compat, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    parsed = asyncio.run(openai_compat.complete_json(system="sys", user="user", attempts=1))
+
+    assert parsed == {"ok": True}
+    assert requests[0][0] == "https://primary.test/v1/responses"
+    assert requests[1][0] == "https://fallback.test/v1/chat/completions"
+    assert requests[1][1]["Authorization"] == "Bearer fallback-key"
+    assert requests[1][2]["model"] == "grok-model"
