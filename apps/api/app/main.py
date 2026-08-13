@@ -182,7 +182,13 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        return {"status": "ok", "version": "0.1.0", "generation_mode": "async"}
+        commit = (settings.render_git_commit or "").strip()
+        return {
+            "status": "ok",
+            "version": "0.1.0",
+            "generation_mode": "async",
+            "git_sha": commit[:12] or None,
+        }
 
     @app.post("/internal/generation-jobs", include_in_schema=False, status_code=status.HTTP_202_ACCEPTED)
     async def internal_generation_job(

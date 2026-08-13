@@ -9,6 +9,17 @@ from app.main import create_app
 from app.schemas import InternalGenerationJobInput
 
 
+def test_health_exposes_safe_git_sha(monkeypatch):
+    settings = get_settings()
+    settings.render_git_commit = "e2e838f0123456789abcdef"
+
+    with TestClient(create_app()) as client:
+        response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["git_sha"] == "e2e838f01234"
+
+
 def test_internal_generation_request_is_accepted_before_long_running_work(monkeypatch):
     scheduled: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
 

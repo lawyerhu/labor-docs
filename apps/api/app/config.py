@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     test_admin_enabled: bool = False
     test_admin_email: str | None = None
     test_admin_password: str | None = None
+    render_git_commit: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
