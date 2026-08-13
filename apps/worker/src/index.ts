@@ -828,6 +828,15 @@ async function getGenerationJob(request: Request, env: Env, caseId: string, jobI
   return json({ id: row.id, status: row.status, stage: row.stage, progress: row.progress, error: row.error, result: parseCaseData(row.result_json) });
 }
 
+async function getActiveGenerationJob(request: Request, env: Env, caseId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  const row = await env.DB.prepare(
+    "SELECT id, status, stage, progress, error FROM generation_jobs WHERE case_id = ? AND status IN ('queued', 'dispatched', 'running', 'finalizing') ORDER BY updated_at DESC LIMIT 1",
+  ).bind(caseId).first<{ id: string; status: string; stage: string; progress: number; error: string | null }>();
+  return json(row ? { id: row.id, status: row.status, stage: row.stage, progress: row.progress, error: row.error } : null);
+}
+
 async function downloadArtifact(request: Request, env: Env, caseId: string, artifactId: string): Promise<Response> {
   const owned = await ownedCase(request, env, caseId);
   if (owned instanceof Response) return owned;
@@ -1366,6 +1375,9 @@ export default {
       if (request.method === "POST" && subpath === "evidence") return uploadEvidence(request, env, caseId);
       if (request.method === "POST" && subpath === "generate") return generateCase(request, env, caseId);
       if (request.method === "POST" && subpath === "legal-search") return legalSearch(request, env, caseId);
+      if (request.method === "GET" && subpath === "generation-jobs/active") {
+        return getActiveGenerationJob(request, env, caseId);
+      }
       if (request.method === "GET" && subpath.startsWith("generation-jobs/")) {
         return getGenerationJob(request, env, caseId, decodeURIComponent(subpath.slice("generation-jobs/".length)));
       }

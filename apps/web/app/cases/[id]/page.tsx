@@ -32,6 +32,7 @@ export default function CaseWorkspacePage() {
   const [error, setError] = useState("");
   const [uploads, setUploads] = useState<Record<string, number>>({});
   const [generation, setGeneration] = useState<{ stage: string; progress: number } | null>(null);
+  const [generationJobId, setGenerationJobId] = useState<string | null>(null);
   const [consentCloudProcessing, setConsentCloudProcessing] = useState(false);
 
   async function reload() {
@@ -44,6 +45,65 @@ export default function CaseWorkspacePage() {
   }
 
   useEffect(() => { reload(); }, [params.id]);
+  useEffect(() => {
+    let cancelled = false;
+    api<GenerationJob | null>(`/api/cases/${params.id}/generation-jobs/active`)
+      .then((job) => {
+        if (cancelled || !job) return;
+        setBusy(true);
+        setGeneration({ stage: generationStageLabels[job.stage] || job.stage || "正在处理", progress: job.progress || 5 });
+        setGenerationJobId(job.id);
+      })
+      .catch((reason) => {
+        const typed = reason as Error & { status?: number };
+        if (!cancelled && typed.status === 401) router.replace("/login");
+      });
+    return () => { cancelled = true; };
+  }, [params.id, router]);
+
+  useEffect(() => {
+    if (!generationJobId) return;
+    let cancelled = false;
+    let timer: number | undefined;
+
+    async function poll() {
+      try {
+        const job = await api<GenerationJob>(`/api/cases/${params.id}/generation-jobs/${generationJobId}`);
+        if (cancelled) return;
+        setGeneration({ stage: generationStageLabels[job.stage] || job.stage || "正在处理", progress: job.progress || 5 });
+        if (job.status === "failed") {
+          setError(job.error || "生成失败");
+          setGenerationJobId(null);
+          setGeneration(null);
+          setBusy(false);
+          return;
+        }
+        if (job.status === "completed") {
+          setGenerationJobId(null);
+          setGeneration(null);
+          setBusy(false);
+          await reload();
+          return;
+        }
+        timer = window.setTimeout(poll, 1500);
+      } catch (reason) {
+        if (cancelled) return;
+        const typed = reason as Error & { status?: number };
+        if (typed.status === 401) {
+          router.replace("/login");
+          return;
+        }
+        timer = window.setTimeout(poll, 3000);
+      }
+    }
+
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [generationJobId, params.id, router]);
+
   const materialProcessing = Boolean(record?.evidence?.some((item) => item.status === "processing"));
   useEffect(() => {
     if (!materialProcessing) return;
@@ -92,6 +152,7 @@ export default function CaseWorkspacePage() {
       setError("请先同意将案情说明和材料文字发送至配置的大模型处理");
       return;
     }
+    let trackingStarted = false;
     setBusy(true); setError(""); setGeneration({ stage: "正在创建生成任务", progress: 3 });
     try {
       const result = await api<{ artifacts?: Artifact[]; job_id?: string }>(`/api/cases/${params.id}/generate`, {
@@ -99,20 +160,28 @@ export default function CaseWorkspacePage() {
         body: JSON.stringify({ consent_cloud_processing: true }),
       });
       if (result.job_id) {
-        for (let attempt = 0; attempt < 180; attempt += 1) {
-          await new Promise((resolve) => window.setTimeout(resolve, 1000));
-          const job = await api<GenerationJob>(`/api/cases/${params.id}/generation-jobs/${result.job_id}`);
-          setGeneration({ stage: generationStageLabels[job.stage] || job.stage || "正在处理", progress: job.progress || 5 });
-          if (job.status === "failed") throw new Error(job.error || "生成失败");
-          if (job.status === "completed") break;
-          if (attempt === 179) throw new Error("生成时间较长，请稍后刷新案件");
-        }
+        trackingStarted = true;
+        setGenerationJobId(result.job_id);
+        return;
       }
       await reload();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "生成失败");
+      const typed = reason as Error & { status?: number };
+      if (typed.status === 409) {
+        const active = await api<GenerationJob | null>(`/api/cases/${params.id}/generation-jobs/active`).catch(() => null);
+        if (active) {
+          trackingStarted = true;
+          setGeneration({ stage: generationStageLabels[active.stage] || active.stage || "正在处理", progress: active.progress || 5 });
+          setGenerationJobId(active.id);
+          return;
+        }
+      }
+      setError(typed.message || "生成失败");
     } finally {
-      setBusy(false); setGeneration(null);
+      if (!trackingStarted) {
+        setBusy(false);
+        setGeneration(null);
+      }
     }
   }
 

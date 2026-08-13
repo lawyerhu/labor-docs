@@ -16,7 +16,7 @@ export interface EvidenceItem {
 
 export interface GenerationJob {
   id: string;
-  status: "queued" | "dispatched" | "running" | "completed" | "failed";
+  status: "queued" | "dispatched" | "running" | "finalizing" | "completed" | "failed";
   stage: string;
   progress: number;
   error?: string;
