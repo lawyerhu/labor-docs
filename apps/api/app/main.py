@@ -188,6 +188,13 @@ def create_app() -> FastAPI:
             "version": "0.1.0",
             "generation_mode": "async",
             "git_sha": commit[:12] or None,
+            "grok_fallback_configured": all(
+                (
+                    settings.grok_base_url,
+                    settings.grok_api_key,
+                    settings.grok_model,
+                )
+            ),
         }
 
     @app.post("/internal/generation-jobs", include_in_schema=False, status_code=status.HTTP_202_ACCEPTED)

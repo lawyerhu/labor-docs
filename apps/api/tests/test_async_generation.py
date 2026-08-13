@@ -11,13 +11,18 @@ from app.schemas import InternalGenerationJobInput
 
 def test_health_exposes_safe_git_sha(monkeypatch):
     settings = get_settings()
-    settings.render_git_commit = "e2e838f0123456789abcdef"
+    monkeypatch.setattr(settings, "render_git_commit", "e2e838f0123456789abcdef")
+    monkeypatch.setattr(settings, "grok_base_url", "https://example.invalid/v1")
+    monkeypatch.setattr(settings, "grok_api_key", "secret-not-exposed")
+    monkeypatch.setattr(settings, "grok_model", "grok-test")
 
     with TestClient(create_app()) as client:
         response = client.get("/api/health")
 
     assert response.status_code == 200
     assert response.json()["git_sha"] == "e2e838f01234"
+    assert response.json()["grok_fallback_configured"] is True
+    assert "secret-not-exposed" not in response.text
 
 
 def test_internal_generation_request_is_accepted_before_long_running_work(monkeypatch):
