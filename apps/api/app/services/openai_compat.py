@@ -21,6 +21,7 @@ class ModelProvider:
     api_key: str
     model: str
     wire_api: str
+    reasoning_effort: str | None = None
 
 
 def _content_text(value: Any) -> str:
@@ -93,6 +94,7 @@ def _configured_provider(settings: Any, prefix: str, name: str) -> ModelProvider
         api_key=str(api_key),
         model=str(model),
         wire_api=str(getattr(settings, f"{prefix}_wire_api", "chat")),
+        reasoning_effort=getattr(settings, f"{prefix}_reasoning_effort", None),
     )
 
 
@@ -112,6 +114,8 @@ async def _complete_with_provider(
             "instructions": system,
             "input": user,
         }
+        if provider.reasoning_effort:
+            body["reasoning"] = {"effort": provider.reasoning_effort}
     elif wire_api in {"chat", "chat_completions", "chat-completions"}:
         url = provider.base_url.rstrip("/") + "/chat/completions"
         body = {
@@ -123,6 +127,8 @@ async def _complete_with_provider(
                 {"role": "user", "content": user},
             ],
         }
+        if provider.reasoning_effort:
+            body["reasoning_effort"] = provider.reasoning_effort
     else:
         raise RuntimeError(f"{provider.name} WIRE_API 只能是 chat 或 responses")
 

@@ -167,6 +167,7 @@ def test_complete_json_falls_back_to_grok(monkeypatch):
         grok_api_key = "fallback-key"
         grok_model = "grok-model"
         grok_wire_api = "chat"
+        grok_reasoning_effort = "high"
 
     class FakeResponse:
         def __init__(self, status_code, payload=None):
@@ -204,3 +205,4 @@ def test_complete_json_falls_back_to_grok(monkeypatch):
     assert requests[1][0] == "https://fallback.test/v1/chat/completions"
     assert requests[1][1]["Authorization"] == "Bearer fallback-key"
     assert requests[1][2]["model"] == "grok-model"
+    assert requests[1][2]["reasoning_effort"] == "high"
