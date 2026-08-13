@@ -3,7 +3,9 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+from math import sqrt
 from pathlib import Path
+from typing import Callable
 
 import pypdfium2 as pdfium
 import pytesseract
@@ -15,13 +17,22 @@ from app.config import get_settings
 
 
 MAX_EXTRACTED_CHARS = 120_000
+DEFAULT_OCR_RENDER_SCALE = 2.2
+MAX_OCR_RENDER_PIXELS = 4_000_000
+ExtractionProgress = Callable[[int, int], None]
 
 
 def _ocr_image(image: Image.Image) -> str:
     return pytesseract.image_to_string(image.convert("RGB"), lang="chi_sim+eng").strip()
 
 
-def _extract_pdf(path: Path) -> str:
+def _bounded_ocr_scale(width: float, height: float) -> float:
+    if width <= 0 or height <= 0:
+        return DEFAULT_OCR_RENDER_SCALE
+    return min(DEFAULT_OCR_RENDER_SCALE, sqrt(MAX_OCR_RENDER_PIXELS / (width * height)))
+
+
+def _extract_pdf(path: Path, progress_callback: ExtractionProgress | None = None) -> str:
     reader = PdfReader(path)
     texts: list[str] = []
     weak_pages: list[int] = []
@@ -32,11 +43,23 @@ def _extract_pdf(path: Path) -> str:
             weak_pages.append(index)
     if weak_pages:
         document = pdfium.PdfDocument(str(path))
-        for index in weak_pages:
-            rendered = document[index].render(scale=2.2).to_pil()
-            ocr_text = _ocr_image(rendered)
-            if len(ocr_text) > len(texts[index]):
-                texts[index] = ocr_text
+        try:
+            total = len(weak_pages)
+            for completed, index in enumerate(weak_pages, start=1):
+                pdf_page = document[index]
+                width, height = pdf_page.get_size()
+                rendered = pdf_page.render(scale=_bounded_ocr_scale(width, height)).to_pil()
+                try:
+                    ocr_text = _ocr_image(rendered)
+                finally:
+                    rendered.close()
+                    pdf_page.close()
+                if len(ocr_text) > len(texts[index]):
+                    texts[index] = ocr_text
+                if progress_callback:
+                    progress_callback(completed, total)
+        finally:
+            document.close()
     return "\n\n".join(f"--- 第{index + 1}页 ---\n{text}" for index, text in enumerate(texts))
 
 
@@ -81,18 +104,20 @@ def _convert_office(path: Path, target_dir: Path) -> Path:
     return converted
 
 
-def extract_material_text(path: Path) -> str:
+def extract_material_text(path: Path, progress_callback: ExtractionProgress | None = None) -> str:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        text = _extract_pdf(path)
+        text = _extract_pdf(path, progress_callback)
     elif suffix in {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}:
         with Image.open(path) as image:
             text = _ocr_image(image)
+        if progress_callback:
+            progress_callback(1, 1)
     elif suffix == ".docx":
         text = _extract_docx(path)
     elif suffix in {".doc", ".xls", ".xlsx"}:
         with tempfile.TemporaryDirectory(prefix="material-") as temp:
-            text = _extract_pdf(_convert_office(path, Path(temp)))
+            text = _extract_pdf(_convert_office(path, Path(temp)), progress_callback)
     else:
         raise RuntimeError(f"暂不支持读取 {suffix or '未知格式'} 材料")
     normalized = "\n".join(line.rstrip() for line in text.splitlines()).strip()

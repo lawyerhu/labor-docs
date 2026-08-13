@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -12,6 +15,9 @@ from app.services.documents import build_case_package
 from app.services.generation import _cleanup_generated_case
 from app.services.material_extraction import extract_material_text
 from app.services.storage import delete_if_managed, materialize_for_processing, persist_artifact
+
+
+logger = logging.getLogger(__name__)
 
 
 class RemoteGenerationError(RuntimeError):
@@ -147,17 +153,64 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
     stage = "validate"
     try:
         await _report_progress(job_id, "正在读取案件与材料", 15)
-        for item in worker_payload.get("evidence") or []:
+        source_items = [item for item in worker_payload.get("evidence") or [] if isinstance(item, dict)]
+        total_items = max(len(source_items), 1)
+        loop = asyncio.get_running_loop()
+        for item_index, item in enumerate(source_items):
             if not isinstance(item, dict) or item.get("status") == "processing":
                 continue
             evidence_id = str(item.get("id") or "")
             if not evidence_id:
                 raise RemoteGenerationError("证据编号无效")
             stage = f"download evidence {evidence_id}"
+            item_start = 15 + (item_index * 23 // total_items)
+            item_end = 15 + ((item_index + 1) * 23 // total_items)
+            await _report_progress(job_id, f"正在读取第 {item_index + 1}/{total_items} 份材料", item_start)
+            started = time.perf_counter()
             stored_path = _s3_stored_path(str(item.get("object_key") or ""))
-            processing_path = materialize_for_processing(stored_path, case_id, evidence_id)
+            processing_path = await asyncio.to_thread(materialize_for_processing, stored_path, case_id, evidence_id)
             processing_paths.append(processing_path)
-            material_texts[evidence_id] = extract_material_text(processing_path)
+            logger.info(
+                "[GENERATION-PERF] job=%s evidence=%s materialize_seconds=%.2f",
+                job_id,
+                evidence_id,
+                time.perf_counter() - started,
+            )
+            analysis = item.get("analysis") if isinstance(item.get("analysis"), dict) else {}
+            cached_text = analysis.get("extracted_text") if isinstance(analysis, dict) else None
+            if isinstance(cached_text, str) and cached_text.strip():
+                material_texts[evidence_id] = cached_text
+            else:
+                stage = f"extract evidence {evidence_id}"
+                progress_updates = []
+
+                def report_page(completed: int, total: int) -> None:
+                    fraction = completed / max(total, 1)
+                    progress = min(item_end, item_start + round((item_end - item_start) * fraction))
+                    progress_updates.append(
+                        asyncio.run_coroutine_threadsafe(
+                            _report_progress(
+                                job_id,
+                                f"正在识别第 {item_index + 1}/{total_items} 份材料（第 {completed}/{total} 页）",
+                                progress,
+                            ),
+                            loop,
+                        )
+                    )
+
+                started = time.perf_counter()
+                material_texts[evidence_id] = await asyncio.to_thread(
+                    extract_material_text, processing_path, report_page
+                )
+                for update in progress_updates:
+                    await asyncio.wrap_future(update)
+                logger.info(
+                    "[GENERATION-PERF] job=%s evidence=%s extraction_seconds=%.2f chars=%s",
+                    job_id,
+                    evidence_id,
+                    time.perf_counter() - started,
+                    len(material_texts[evidence_id]),
+                )
             evidence_items.append(
                 {
                     "id": evidence_id,
@@ -166,8 +219,10 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
                     "source": item.get("source") or "",
                     "purpose": item.get("purpose") or "",
                     "stored_path": str(processing_path),
+                    "analysis": analysis,
                 }
             )
+            await _report_progress(job_id, f"第 {item_index + 1}/{total_items} 份材料读取完成", item_end)
         await _report_progress(job_id, "材料文字识别完成", 38)
         stage = "draft documents"
         await _report_progress(job_id, "大模型正在分析全案并撰写文书", 50)
@@ -185,7 +240,8 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
         await _report_progress(job_id, "文书正文撰写完成", 76)
         stage = "build package"
         await _report_progress(job_id, "正在排版起诉状、目录和证据", 84)
-        result = build_case_package(
+        result = await asyncio.to_thread(
+            build_case_package,
             case_id=case_id,
             payload={"case_stage": case_stage, "party_side": party_side, "data": data},
             evidence_items=evidence_items,
@@ -195,7 +251,7 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
         await _report_progress(job_id, "正在保存生成文件", 93)
         for generated in result.artifacts:
             stage = f"upload artifact {generated.kind}"
-            stored_path = persist_artifact(case_id, generated.path)
+            stored_path = await asyncio.to_thread(persist_artifact, case_id, generated.path)
             artifacts.append(
                 {
                     "kind": generated.kind,
@@ -213,10 +269,19 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
         for processing_path in processing_paths:
             delete_if_managed(str(processing_path))
 
+    evidence_updates = []
+    for update in draft["evidence_updates"]:
+        evidence_id = str(update.get("id") or "")
+        original = next((item for item in evidence_items if item["id"] == evidence_id), None)
+        analysis = dict(original.get("analysis") or {}) if original else {}
+        if evidence_id in material_texts:
+            analysis["extracted_text"] = material_texts[evidence_id]
+        evidence_updates.append({**update, "analysis": analysis})
+
     return {
         "readiness": result.readiness,
         "missing_fields": result.missing_fields,
         "generation_count": int(case.get("generation_count") or 0) + 1,
         "artifacts": artifacts,
-        "evidence_updates": draft["evidence_updates"],
+        "evidence_updates": evidence_updates,
     }

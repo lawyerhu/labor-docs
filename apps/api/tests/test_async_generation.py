@@ -67,3 +67,28 @@ def test_background_generation_reports_completed_result(monkeypatch):
             },
         )
     ]
+
+
+def test_background_generation_reports_specific_failure(monkeypatch):
+    reported: list[str | None] = []
+
+    async def fetch_case(case_id):
+        return {"case": {"id": case_id}}
+
+    async def generate(worker_payload, job_id):
+        raise RuntimeError("extract evidence failed: TesseractNotFoundError")
+
+    async def report(job_id, case_id, *, result=None, error=None):
+        reported.append(error)
+
+    monkeypatch.setattr(main_module, "fetch_worker_generation_input", fetch_case)
+    monkeypatch.setattr(main_module, "run_remote_generation", generate)
+    monkeypatch.setattr(main_module, "report_generation_result", report)
+
+    asyncio.run(
+        main_module._process_internal_generation_job(
+            InternalGenerationJobInput(version=1, job_id="job-1", case_id="case-1")
+        )
+    )
+
+    assert reported == ["Document generation failed: extract evidence failed: TesseractNotFoundError"]

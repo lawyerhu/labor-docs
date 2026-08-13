@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import secrets
@@ -68,7 +69,7 @@ async def _process_internal_generation_job(payload: InternalGenerationJobInput) 
             await report_generation_result(
                 payload.job_id,
                 payload.case_id,
-                error=f"Document generation failed ({type(exc).__name__})",
+                error=f"Document generation failed: {str(exc) or type(exc).__name__}",
             )
         except Exception:
             logger.exception("[GENERATION-CALLBACK-ERROR] failed to report generation failure")
@@ -216,8 +217,11 @@ def create_app() -> FastAPI:
             if not item:
                 raise RemoteGenerationError("证据不存在")
             object_key = str(item.get("object_key") or "")
-            processing_path = materialize_for_processing(
-                _s3_stored_path(object_key), payload.case_id, payload.evidence_id
+            processing_path = await asyncio.to_thread(
+                materialize_for_processing,
+                _s3_stored_path(object_key),
+                payload.case_id,
+                payload.evidence_id,
             )
             return await analyze_material(case=case, item=item, path=processing_path)
         except RemoteGenerationError as exc:

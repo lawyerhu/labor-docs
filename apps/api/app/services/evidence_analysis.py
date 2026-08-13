@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -42,4 +43,7 @@ summary：客观概括材料的关键内容。key_facts：字符串数组。conf
 
 
 async def analyze_material(*, case: dict[str, Any], item: dict[str, Any], path: Path) -> dict[str, Any]:
-    return await analyze_evidence_text(case=case, item=item, text=extract_material_text(path))
+    text = await asyncio.to_thread(extract_material_text, path)
+    result = await analyze_evidence_text(case=case, item=item, text=text)
+    result["analysis"]["extracted_text"] = text
+    return result

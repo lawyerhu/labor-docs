@@ -31,6 +31,7 @@ interface Env {
 }
 
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
+const GENERATION_STALE_MS = 30 * 60 * 1000;
 
 type PublicUser = { id: string; email: string; unlimited_generation?: boolean };
 
@@ -783,6 +784,19 @@ async function deleteEvidence(request: Request, env: Env, caseId: string, eviden
   return new Response(null, { status: 204 });
 }
 
+async function failStaleGenerationJobs(env: Env, caseId: string): Promise<void> {
+  const staleBefore = new Date(Date.now() - GENERATION_STALE_MS).toISOString();
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = '生成任务超过30分钟未更新，已自动结束，请重新生成', updated_at = ? WHERE case_id = ? AND status IN ('queued', 'dispatched', 'running', 'finalizing') AND updated_at < ?",
+    ).bind(now, caseId, staleBefore),
+    env.DB.prepare(
+      "UPDATE cases SET status = 'ready_to_generate' WHERE id = ? AND NOT EXISTS (SELECT 1 FROM generation_jobs WHERE case_id = ? AND status IN ('queued', 'dispatched', 'running', 'finalizing'))",
+    ).bind(caseId, caseId),
+  ]);
+}
+
 async function generateCase(request: Request, env: Env, caseId: string): Promise<Response> {
   const owned = await ownedCase(request, env, caseId);
   if (owned instanceof Response) return owned;
@@ -800,6 +814,7 @@ async function generateCase(request: Request, env: Env, caseId: string): Promise
   const material = await env.DB.prepare("SELECT id FROM evidence WHERE case_id = ? AND status = 'processing' LIMIT 1")
     .bind(caseId).first<{ id: string }>();
   if (material) return json({ detail: "材料仍在识别，请等待进度完成后再生成" }, { status: 409 });
+  await failStaleGenerationJobs(env, caseId);
   const running = await env.DB.prepare("SELECT id FROM generation_jobs WHERE case_id = ? AND status IN ('queued', 'running', 'dispatched', 'finalizing') LIMIT 1")
     .bind(caseId).first<{ id: string }>();
   if (running) return json({ detail: "已有生成任务正在处理中" }, { status: 409 });
@@ -831,6 +846,7 @@ async function getGenerationJob(request: Request, env: Env, caseId: string, jobI
 async function getActiveGenerationJob(request: Request, env: Env, caseId: string): Promise<Response> {
   const owned = await ownedCase(request, env, caseId);
   if (owned instanceof Response) return owned;
+  await failStaleGenerationJobs(env, caseId);
   const row = await env.DB.prepare(
     "SELECT id, status, stage, progress, error FROM generation_jobs WHERE case_id = ? AND status IN ('queued', 'dispatched', 'running', 'finalizing') ORDER BY updated_at DESC LIMIT 1",
   ).bind(caseId).first<{ id: string; status: string; stage: string; progress: number; error: string | null }>();
@@ -1021,7 +1037,10 @@ async function getGenerationInput(request: Request, env: Env, caseId: string): P
         created_at: row.created_at,
         expires_at: row.expires_at,
       },
-      evidence: evidence.results,
+      evidence: evidence.results.map((item) => ({
+        ...item,
+        analysis: parseCaseData(item.analysis_json),
+      })),
     },
     { headers: { "Cache-Control": "no-store" } },
   );
@@ -1100,12 +1119,15 @@ async function finalizeGenerationResult(
   const evidenceUpdates = Array.isArray((result as { evidence_updates?: unknown }).evidence_updates)
     ? (result as { evidence_updates: unknown[] }).evidence_updates.flatMap((item) => {
       if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-      const candidate = item as { id?: unknown; name?: unknown; source?: unknown; purpose?: unknown };
+      const candidate = item as { id?: unknown; name?: unknown; source?: unknown; purpose?: unknown; analysis?: unknown };
       const id = typeof candidate.id === "string" ? candidate.id : "";
       const name = typeof candidate.name === "string" ? candidate.name.trim().slice(0, 255) : "";
       const source = typeof candidate.source === "string" ? candidate.source.trim().slice(0, 255) : "";
       const purpose = typeof candidate.purpose === "string" ? candidate.purpose.trim().slice(0, 2000) : "";
-      return id && name && source && purpose ? [{ id, name, source, purpose }] : [];
+      const analysis = candidate.analysis && typeof candidate.analysis === "object" && !Array.isArray(candidate.analysis)
+        ? candidate.analysis as Record<string, unknown>
+        : null;
+      return id && name && source && purpose ? [{ id, name, source, purpose, analysis }] : [];
     })
     : [];
   const artifacts = rawArtifacts.flatMap((item) => {
@@ -1142,8 +1164,16 @@ async function finalizeGenerationResult(
     env.DB.prepare("UPDATE cases SET status = 'generated', generation_count = generation_count + 1 WHERE id = ?")
       .bind(caseId),
     ...evidenceUpdates.map((item) =>
-      env.DB.prepare("UPDATE evidence SET name = ?, source = ?, purpose = ? WHERE id = ? AND case_id = ?")
-        .bind(item.name, item.source, item.purpose, item.id, caseId),
+      env.DB.prepare("UPDATE evidence SET name = ?, source = ?, purpose = ?, analysis_json = CASE WHEN ? IS NULL THEN analysis_json ELSE ? END WHERE id = ? AND case_id = ?")
+        .bind(
+          item.name,
+          item.source,
+          item.purpose,
+          item.analysis ? JSON.stringify(item.analysis) : null,
+          item.analysis ? JSON.stringify(item.analysis) : null,
+          item.id,
+          caseId,
+        ),
     ),
     ...artifacts.map((artifact) =>
       env.DB.prepare(
