@@ -187,6 +187,20 @@ def create_app() -> FastAPI:
             "version": "0.1.0",
             "generation_mode": "async",
             "git_sha": commit[:12] or None,
+            "deepseek_primary_configured": all(
+                (
+                    settings.deepseek_base_url,
+                    settings.deepseek_api_key,
+                    settings.deepseek_model,
+                )
+            ),
+            "openai_fallback_configured": all(
+                (
+                    settings.openai_base_url,
+                    settings.openai_api_key,
+                    settings.openai_model,
+                )
+            ),
             "grok_fallback_configured": all(
                 (
                     settings.grok_base_url,

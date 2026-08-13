@@ -206,3 +206,64 @@ def test_complete_json_falls_back_to_grok(monkeypatch):
     assert requests[1][1]["Authorization"] == "Bearer fallback-key"
     assert requests[1][2]["model"] == "grok-model"
     assert requests[1][2]["reasoning_effort"] == "high"
+
+
+def test_complete_json_uses_deepseek_then_openai_then_grok(monkeypatch):
+    class FakeSettings:
+        deepseek_base_url = "https://deepseek.test/v1"
+        deepseek_api_key = "deepseek-key"
+        deepseek_model = "deepseek-v4-flash"
+        deepseek_wire_api = "chat"
+        deepseek_reasoning_effort = "high"
+        openai_base_url = "https://openai.test/v1"
+        openai_api_key = "openai-key"
+        openai_model = "gpt-5.6-sol"
+        openai_wire_api = "responses"
+        grok_base_url = "https://grok.test/v1"
+        grok_api_key = "grok-key"
+        grok_model = "grok-4.6"
+        grok_wire_api = "chat"
+        grok_reasoning_effort = "high"
+
+    class FakeResponse:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    requests = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, *, headers, json):
+            requests.append((url, headers, json))
+            if url in {
+                "https://deepseek.test/v1/chat/completions",
+                "https://openai.test/v1/responses",
+            }:
+                return FakeResponse(503)
+            return FakeResponse(200, {"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+    monkeypatch.setattr(openai_compat, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    parsed = asyncio.run(openai_compat.complete_json(system="sys", user="user", attempts=1))
+
+    assert parsed == {"ok": True}
+    assert [request[0] for request in requests] == [
+        "https://deepseek.test/v1/chat/completions",
+        "https://openai.test/v1/responses",
+        "https://grok.test/v1/chat/completions",
+    ]
+    assert requests[0][2]["model"] == "deepseek-v4-flash"
+    assert requests[0][2]["reasoning_effort"] == "high"

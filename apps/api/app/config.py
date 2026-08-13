@@ -23,10 +23,16 @@ class Settings(BaseSettings):
     max_case_files: int = 20
     max_case_bytes: int = 300 * 1024 * 1024
     session_max_age_seconds: int = 30 * 24 * 60 * 60
+    deepseek_base_url: str | None = "https://api.deepseek.com"
+    deepseek_api_key: str | None = None
+    deepseek_model: str | None = "deepseek-v4-flash"
+    deepseek_wire_api: str = "chat"
+    deepseek_reasoning_effort: str | None = "high"
     openai_base_url: str | None = None
     openai_api_key: str | None = None
     openai_model: str | None = None
     openai_wire_api: str = "chat"
+    openai_reasoning_effort: str | None = None
     grok_base_url: str | None = None
     grok_api_key: str | None = None
     grok_model: str | None = None

@@ -12,6 +12,12 @@ from app.schemas import InternalGenerationJobInput
 def test_health_exposes_safe_git_sha(monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "render_git_commit", "e2e838f0123456789abcdef")
+    monkeypatch.setattr(settings, "deepseek_base_url", None)
+    monkeypatch.setattr(settings, "deepseek_api_key", None)
+    monkeypatch.setattr(settings, "deepseek_model", None)
+    monkeypatch.setattr(settings, "openai_base_url", None)
+    monkeypatch.setattr(settings, "openai_api_key", None)
+    monkeypatch.setattr(settings, "openai_model", None)
     monkeypatch.setattr(settings, "grok_base_url", "https://example.invalid/v1")
     monkeypatch.setattr(settings, "grok_api_key", "secret-not-exposed")
     monkeypatch.setattr(settings, "grok_model", "grok-test")
@@ -21,6 +27,8 @@ def test_health_exposes_safe_git_sha(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["git_sha"] == "e2e838f01234"
+    assert response.json()["deepseek_primary_configured"] is False
+    assert response.json()["openai_fallback_configured"] is False
     assert response.json()["grok_fallback_configured"] is True
     assert "secret-not-exposed" not in response.text
 

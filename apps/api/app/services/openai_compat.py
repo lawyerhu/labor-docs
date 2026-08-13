@@ -161,30 +161,35 @@ async def _complete_with_provider(
 
 async def complete_json(*, system: str, user: str, timeout: float = 60, attempts: int = 3) -> dict[str, Any]:
     settings = get_settings()
-    primary = _configured_provider(settings, "openai", "主模型")
-    if primary is None:
+    providers = [
+        _configured_provider(settings, "deepseek", "DeepSeek 主模型"),
+        _configured_provider(settings, "openai", "OpenAI 第一备用模型"),
+        _configured_provider(settings, "grok", "Grok 第二备用模型"),
+    ]
+    configured = [provider for provider in providers if provider is not None]
+    if not configured:
         raise RuntimeError("大模型未配置")
 
-    try:
-        return await _complete_with_provider(
-            primary,
-            system=system,
-            user=user,
-            timeout=timeout,
-            attempts=attempts,
-        )
-    except RuntimeError as primary_error:
-        fallback = _configured_provider(settings, "grok", "Grok 备用模型")
-        if fallback is None:
-            raise
-        logger.warning("[MODEL-FAILOVER] primary=%s fallback=%s reason=%s", primary.name, fallback.name, primary_error)
+    errors: list[str] = []
+    for index, provider in enumerate(configured):
         try:
             return await _complete_with_provider(
-                fallback,
+                provider,
                 system=system,
                 user=user,
                 timeout=timeout,
                 attempts=attempts,
             )
-        except RuntimeError as fallback_error:
-            raise RuntimeError(f"主模型失败：{primary_error}；Grok 备用模型失败：{fallback_error}") from fallback_error
+        except RuntimeError as error:
+            if len(configured) == 1:
+                raise
+            errors.append(f"{provider.name}失败：{error}")
+            if index + 1 < len(configured):
+                logger.warning(
+                    "[MODEL-FAILOVER] current=%s fallback=%s reason=%s",
+                    provider.name,
+                    configured[index + 1].name,
+                    error,
+                )
+
+    raise RuntimeError("；".join(errors))
