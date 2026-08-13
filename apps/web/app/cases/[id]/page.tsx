@@ -104,7 +104,7 @@ export default function CaseWorkspacePage() {
     };
   }, [generationJobId, params.id, router]);
 
-  const materialProcessing = Boolean(record?.evidence?.some((item) => item.status === "processing"));
+  const materialProcessing = Boolean(record?.evidence?.some((item) => item.status === "queued" || item.status === "processing"));
   useEffect(() => {
     if (!materialProcessing) return;
     const timer = window.setInterval(reload, 1500);
@@ -225,8 +225,9 @@ export default function CaseWorkspacePage() {
 }
 
 function EvidenceCard({ item, index, onDelete }: { item: EvidenceItem; index: number; onDelete: () => void }) {
-  const processing = item.status === "processing";
+  const processing = item.status === "queued" || item.status === "processing";
   const failed = item.status === "failed";
+  const analysisError = typeof item.analysis?.error === "string" ? item.analysis.error : "本次识别未完成，请删除后重新上传。";
   return <article className="evidence-item">
     <div className="evidence-number">{index + 1}</div>
     <div className="evidence-summary">
@@ -234,7 +235,7 @@ function EvidenceCard({ item, index, onDelete }: { item: EvidenceItem; index: nu
       <small>原文件：{item.original_name}</small>
       {processing
         ? <ProgressBlock label={stageLabels[item.processing_stage] || "正在处理材料"} progress={item.processing_progress || 10} compact />
-         : <dl><div><dt>证明目的</dt><dd>{item.purpose || (failed ? "本次识别未完成，将在全案生成时重新判断" : "将在全案生成时判断")}</dd></div></dl>}
+         : <dl><div><dt>{failed ? "处理结果" : "证明目的"}</dt><dd>{failed ? analysisError : (item.purpose || "将在全案生成时判断")}</dd></div></dl>}
     </div>
     <div className="evidence-actions"><button className="icon-button danger" onClick={onDelete} aria-label={`删除${item.name || item.original_name}`}><Trash2 size={17} /></button></div>
   </article>;

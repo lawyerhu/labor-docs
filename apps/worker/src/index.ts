@@ -32,6 +32,9 @@ interface Env {
 
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 const GENERATION_STALE_MS = 30 * 60 * 1000;
+const EVIDENCE_ANALYSIS_TIMEOUT_MS = 3 * 60 * 1000;
+const EVIDENCE_ANALYSIS_MAX_ATTEMPTS = 3;
+const EVIDENCE_STALE_MS = 15 * 60 * 1000;
 
 type PublicUser = { id: string; email: string; unlimited_generation?: boolean };
 
@@ -591,6 +594,7 @@ async function ownedCase(request: Request, env: Env, caseId: string): Promise<{ 
 }
 
 async function casePayload(env: Env, row: CaseRow, user?: PublicUser) {
+  await recoverStaleEvidence(env, row.id);
   const data = parseCaseData(row.data_json);
   const readiness = readinessFor(row, data);
   const [evidence, artifacts] = await Promise.all([
@@ -618,6 +622,20 @@ async function casePayload(env: Env, row: CaseRow, user?: PublicUser) {
     evidence: evidence.results.map(evidencePayload),
     artifacts: artifacts.results,
   };
+}
+
+async function recoverStaleEvidence(env: Env, caseId: string): Promise<void> {
+  const staleBefore = new Date(Date.now() - EVIDENCE_STALE_MS).toISOString();
+  const error = JSON.stringify({ error: "材料识别超过15分钟未完成，请删除该材料后重新上传。" });
+  const stale = await env.DB.prepare("SELECT id FROM evidence WHERE case_id = ? AND status IN ('queued', 'processing') AND created_at < ? LIMIT 1")
+    .bind(caseId, staleBefore).first<{ id: string }>();
+  if (!stale) return;
+  await env.DB.batch([
+    env.DB.prepare("UPDATE evidence SET status = 'failed', processing_stage = 'failed', processing_progress = 100, analysis_json = ? WHERE case_id = ? AND status IN ('queued', 'processing') AND created_at < ?")
+      .bind(error, caseId, staleBefore),
+    env.DB.prepare("UPDATE cases SET status = 'ready_to_generate' WHERE id = ? AND NOT EXISTS (SELECT 1 FROM evidence WHERE case_id = ? AND status IN ('queued', 'processing'))")
+      .bind(caseId, caseId),
+  ]);
 }
 
 async function listCases(request: Request, env: Env): Promise<Response> {
@@ -854,6 +872,7 @@ async function failStaleGenerationJobs(env: Env, caseId: string): Promise<void> 
 async function generateCase(request: Request, env: Env, caseId: string): Promise<Response> {
   const owned = await ownedCase(request, env, caseId);
   if (owned instanceof Response) return owned;
+  await recoverStaleEvidence(env, caseId);
   let body: { consent_cloud_processing?: unknown };
   try { body = await request.json() as typeof body; } catch { return json({ detail: "请求体必须是 JSON" }, { status: 400 }); }
   if (body.consent_cloud_processing !== true) {
@@ -865,7 +884,7 @@ async function generateCase(request: Request, env: Env, caseId: string): Promise
   }
   if (owned.row.access_status === "locked") return json({ detail: "请先使用兑换码解锁该案件" }, { status: 402 });
   if (owned.row.generation_count >= 3) return json({ detail: "本案件最多成功生成3次" }, { status: 429 });
-  const material = await env.DB.prepare("SELECT id FROM evidence WHERE case_id = ? AND status = 'processing' LIMIT 1")
+  const material = await env.DB.prepare("SELECT id FROM evidence WHERE case_id = ? AND status IN ('queued', 'processing') LIMIT 1")
     .bind(caseId).first<{ id: string }>();
   if (material) return json({ detail: "材料仍在识别，请等待进度完成后再生成" }, { status: 409 });
   await failStaleGenerationJobs(env, caseId);
@@ -1134,33 +1153,71 @@ async function dispatchEvidenceAnalysis(message: Message<EvidenceAnalysisMessage
   }
   const headers = new Headers({ "Content-Type": "application/json" });
   if (env.GENERATOR_AUTH_TOKEN) headers.set("Authorization", `Bearer ${env.GENERATOR_AUTH_TOKEN}`);
+
+  const failEvidence = async (detail: string): Promise<void> => {
+    const error = detail.slice(0, 1000);
+    await env.DB.batch([
+      env.DB.prepare("UPDATE evidence SET status = 'failed', processing_stage = 'failed', processing_progress = 100, analysis_json = ? WHERE id = ? AND case_id = ?")
+        .bind(JSON.stringify({ error }), evidenceId, caseId),
+      env.DB.prepare("UPDATE cases SET status = CASE WHEN NOT EXISTS (SELECT 1 FROM evidence WHERE case_id = ? AND status IN ('queued', 'processing')) THEN 'ready_to_generate' ELSE status END WHERE id = ?")
+        .bind(caseId, caseId),
+    ]);
+  };
+
+  const retryOrFail = async (detail: string): Promise<void> => {
+    if (message.attempts >= EVIDENCE_ANALYSIS_MAX_ATTEMPTS) {
+      await failEvidence(`材料识别失败：${detail}。请删除该材料后重新上传。`);
+      message.ack();
+      return;
+    }
+    await env.DB.prepare("UPDATE evidence SET status = 'processing', processing_stage = 'retrying', processing_progress = 55 WHERE id = ? AND case_id = ?")
+      .bind(evidenceId, caseId).run();
+    message.retry({ delaySeconds: Math.min(60, Math.max(5, message.attempts * 10)) });
+  };
+
   let response: Response;
   try {
     await env.DB.prepare("UPDATE evidence SET processing_stage = 'analyzing', processing_progress = 55 WHERE id = ?").bind(evidenceId).run();
-    response = await fetch(`${generatorUrl.replace(/\/$/, "")}/internal/evidence-analysis`, {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), EVIDENCE_ANALYSIS_TIMEOUT_MS);
+    try {
+      response = await fetch(`${generatorUrl.replace(/\/$/, "")}/internal/evidence-analysis`, {
       method: "POST", headers, body: JSON.stringify({ version: 1, evidence_id: evidenceId, case_id: caseId }),
-    });
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch (error) {
-    await env.DB.prepare("UPDATE evidence SET processing_stage = 'retrying', processing_progress = 55 WHERE id = ?").bind(evidenceId).run();
-    throw error;
+    const detail = error instanceof DOMException && error.name === "AbortError"
+      ? `分析服务超过 ${Math.round(EVIDENCE_ANALYSIS_TIMEOUT_MS / 1000)} 秒未响应`
+      : `分析服务请求失败：${String(error)}`;
+    await retryOrFail(detail);
+    return;
   }
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 1000);
     if (response.status >= 400 && response.status < 500) {
-      await env.DB.prepare("UPDATE evidence SET status = 'failed', processing_stage = 'failed', processing_progress = 100, analysis_json = ? WHERE id = ?")
-        .bind(JSON.stringify({ error: detail }), evidenceId).run();
+      await failEvidence(`分析服务返回 ${response.status}：${detail}`);
       message.ack();
       return;
     }
-    throw new Error(`evidence analyzer returned ${response.status}`);
+    await retryOrFail(`分析服务返回 ${response.status}`);
+    return;
   }
-  const result = await response.json() as { name?: unknown; purpose?: unknown; analysis?: unknown };
+  let result: { name?: unknown; purpose?: unknown; analysis?: unknown };
+  try {
+    result = await response.json() as typeof result;
+  } catch (error) {
+    await retryOrFail(`分析服务返回格式无效：${String(error)}`);
+    return;
+  }
   const name = typeof result.name === "string" ? result.name.trim().slice(0, 255) : "材料";
   const purpose = typeof result.purpose === "string" ? result.purpose.trim().slice(0, 2000) : "[待核实证明目的]";
   await env.DB.batch([
     env.DB.prepare("UPDATE evidence SET name = ?, purpose = ?, status = 'ready', processing_stage = 'complete', processing_progress = 100, analysis_json = ? WHERE id = ? AND case_id = ?")
       .bind(name || "材料", purpose, JSON.stringify(result.analysis || {}), evidenceId, caseId),
-    env.DB.prepare("UPDATE cases SET status = CASE WHEN NOT EXISTS (SELECT 1 FROM evidence WHERE case_id = ? AND status = 'processing' AND id <> ?) THEN 'ready_to_generate' ELSE status END WHERE id = ?")
+    env.DB.prepare("UPDATE cases SET status = CASE WHEN NOT EXISTS (SELECT 1 FROM evidence WHERE case_id = ? AND status IN ('queued', 'processing') AND id <> ?) THEN 'ready_to_generate' ELSE status END WHERE id = ?")
       .bind(caseId, evidenceId, caseId),
   ]);
   message.ack();
