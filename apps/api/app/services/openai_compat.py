@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from dataclasses import dataclass
@@ -105,26 +106,44 @@ async def _complete_with_provider(
     user: str,
     timeout: float,
     attempts: int,
+    image_data_url: str | None = None,
 ) -> dict[str, Any]:
     wire_api = provider.wire_api.strip().lower()
     if wire_api == "responses":
         url = provider.base_url.rstrip("/") + "/responses"
+        input_value: Any = user
+        if image_data_url:
+            input_value = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": user},
+                        {"type": "input_image", "image_url": image_data_url},
+                    ],
+                }
+            ]
         body: dict[str, Any] = {
             "model": provider.model,
             "instructions": system,
-            "input": user,
+            "input": input_value,
         }
         if provider.reasoning_effort:
             body["reasoning"] = {"effort": provider.reasoning_effort}
     elif wire_api in {"chat", "chat_completions", "chat-completions"}:
         url = provider.base_url.rstrip("/") + "/chat/completions"
+        user_content: Any = user
+        if image_data_url:
+            user_content = [
+                {"type": "text", "text": user},
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ]
         body = {
             "model": provider.model,
             "temperature": 0,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": user},
+                {"role": "user", "content": user_content},
             ],
         }
         if provider.reasoning_effort:
@@ -192,4 +211,50 @@ async def complete_json(*, system: str, user: str, timeout: float = 60, attempts
                     error,
                 )
 
+    raise RuntimeError("；".join(errors))
+
+
+async def complete_vision_json(
+    *,
+    system: str,
+    user: str,
+    image_bytes: bytes,
+    mime_type: str,
+    timeout: float = 90,
+    attempts: int = 2,
+) -> dict[str, Any]:
+    """Review one page image with OpenAI first and Grok as visual fallback."""
+    settings = get_settings()
+    providers = [
+        _configured_provider(settings, "openai", "OpenAI 视觉主模型"),
+        _configured_provider(settings, "grok", "Grok 视觉备用模型"),
+    ]
+    configured = [provider for provider in providers if provider is not None]
+    if not configured:
+        raise RuntimeError("视觉模型未配置")
+
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    image_data_url = f"data:{mime_type};base64,{encoded}"
+    errors: list[str] = []
+    for index, provider in enumerate(configured):
+        try:
+            return await _complete_with_provider(
+                provider,
+                system=system,
+                user=user,
+                timeout=timeout,
+                attempts=attempts,
+                image_data_url=image_data_url,
+            )
+        except RuntimeError as error:
+            if len(configured) == 1:
+                raise
+            errors.append(f"{provider.name}失败：{error}")
+            if index + 1 < len(configured):
+                logger.warning(
+                    "[VISION-FAILOVER] current=%s fallback=%s reason=%s",
+                    provider.name,
+                    configured[index + 1].name,
+                    error,
+                )
     raise RuntimeError("；".join(errors))

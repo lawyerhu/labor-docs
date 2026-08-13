@@ -267,3 +267,67 @@ def test_complete_json_uses_deepseek_then_openai_then_grok(monkeypatch):
     ]
     assert requests[0][2]["model"] == "deepseek-v4-flash"
     assert requests[0][2]["reasoning_effort"] == "high"
+
+
+def test_complete_vision_json_uses_openai_then_grok_and_sends_image(monkeypatch):
+    class FakeSettings:
+        openai_base_url = "https://openai.test/v1"
+        openai_api_key = "openai-key"
+        openai_model = "gpt-5.6-sol"
+        openai_wire_api = "responses"
+        openai_reasoning_effort = "high"
+        grok_base_url = "https://grok.test/v1"
+        grok_api_key = "grok-key"
+        grok_model = "grok-4.6"
+        grok_wire_api = "chat"
+        grok_reasoning_effort = "high"
+
+    class FakeResponse:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    requests = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, *, headers, json):
+            requests.append((url, headers, json))
+            if url == "https://openai.test/v1/responses":
+                return FakeResponse(503)
+            return FakeResponse(200, {"choices": [{"message": {"content": '{"corrected_text":"复核正文"}'}}]})
+
+    monkeypatch.setattr(openai_compat, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    parsed = asyncio.run(
+        openai_compat.complete_vision_json(
+            system="sys",
+            user="ocr text",
+            image_bytes=b"test-image",
+            mime_type="image/jpeg",
+            attempts=1,
+        )
+    )
+
+    assert parsed == {"corrected_text": "复核正文"}
+    assert [request[0] for request in requests] == [
+        "https://openai.test/v1/responses",
+        "https://grok.test/v1/chat/completions",
+    ]
+    responses_content = requests[0][2]["input"][0]["content"]
+    assert responses_content[1]["type"] == "input_image"
+    assert responses_content[1]["image_url"].startswith("data:image/jpeg;base64,")
+    chat_content = requests[1][2]["messages"][1]["content"]
+    assert chat_content[1]["type"] == "image_url"

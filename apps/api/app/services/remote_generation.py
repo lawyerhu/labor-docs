@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.services.document_drafting import draft_case_documents
 from app.services.documents import build_case_package
 from app.services.generation import _cleanup_generated_case
-from app.services.material_extraction import extract_material_text
+from app.services.material_extraction import extract_material_with_vision
 from app.services.storage import delete_if_managed, materialize_for_processing, persist_artifact
 
 
@@ -77,7 +77,7 @@ async def _cache_extracted_text(case_id: str, evidence_id: str, analysis: dict[s
     headers = {"Content-Type": "application/json"}
     if settings.worker_internal_token:
         headers["X-Internal-Token"] = settings.worker_internal_token
-    payload = {**analysis, "extracted_text": text}
+    payload = {**analysis, "extracted_text": text, "extraction_version": 2}
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             await client.post(
@@ -198,7 +198,11 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
             )
             analysis = item.get("analysis") if isinstance(item.get("analysis"), dict) else {}
             cached_text = analysis.get("extracted_text") if isinstance(analysis, dict) else None
-            if isinstance(cached_text, str) and cached_text.strip():
+            if (
+                isinstance(cached_text, str)
+                and cached_text.strip()
+                and analysis.get("extraction_version") == 2
+            ):
                 material_texts[evidence_id] = cached_text
             else:
                 stage = f"extract evidence {evidence_id}"
@@ -206,7 +210,7 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
 
                 def report_page(completed: int, total: int) -> None:
                     fraction = completed / max(total, 1)
-                    progress = min(item_end, item_start + round((item_end - item_start) * fraction))
+                    progress = min(item_end, item_start + round((item_end - item_start) * 0.75 * fraction))
                     progress_updates.append(
                         asyncio.run_coroutine_threadsafe(
                             _report_progress(
@@ -218,19 +222,39 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
                         )
                     )
 
+                def report_vision(completed: int, total: int) -> None:
+                    fraction = completed / max(total, 1)
+                    progress = min(item_end, item_start + round((item_end - item_start) * (0.75 + 0.25 * fraction)))
+                    progress_updates.append(
+                        asyncio.run_coroutine_threadsafe(
+                            _report_progress(
+                                job_id,
+                                f"视觉模型正在复核第 {item_index + 1}/{total_items} 份材料（第 {completed}/{total} 个疑难页）",
+                                progress,
+                            ),
+                            loop,
+                        )
+                    )
+
                 started = time.perf_counter()
-                material_texts[evidence_id] = await asyncio.to_thread(
-                    extract_material_text, processing_path, report_page
+                extraction = await extract_material_with_vision(
+                    processing_path,
+                    progress_callback=report_page,
+                    vision_progress_callback=report_vision,
                 )
+                material_texts[evidence_id] = extraction.text
                 for update in progress_updates:
                     await asyncio.wrap_future(update)
                 logger.info(
-                    "[GENERATION-PERF] job=%s evidence=%s extraction_seconds=%.2f chars=%s",
+                    "[GENERATION-PERF] job=%s evidence=%s extraction_seconds=%.2f chars=%s vision_pages=%s",
                     job_id,
                     evidence_id,
                     time.perf_counter() - started,
                     len(material_texts[evidence_id]),
+                    list(extraction.vision_reviewed_pages),
                 )
+                analysis["extraction_version"] = 2
+                analysis["vision_reviewed_pages"] = list(extraction.vision_reviewed_pages)
                 await _cache_extracted_text(case_id, evidence_id, analysis, material_texts[evidence_id])
             evidence_items.append(
                 {
@@ -297,6 +321,7 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
         analysis = dict(original.get("analysis") or {}) if original else {}
         if evidence_id in material_texts:
             analysis["extracted_text"] = material_texts[evidence_id]
+            analysis["extraction_version"] = 2
         evidence_updates.append({**update, "analysis": analysis})
 
     return {

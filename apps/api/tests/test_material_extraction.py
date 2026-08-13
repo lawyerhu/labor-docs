@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 from pypdf import PdfWriter
@@ -42,3 +43,73 @@ def test_adaptive_ocr_retries_only_when_first_pass_is_too_short():
     assert first == enough
     assert second == "retry text that is longer"
     assert calls == ["retry"]
+
+
+def test_low_risk_page_does_not_call_vision_model(tmp_path: Path, monkeypatch):
+    path = tmp_path / "material.pdf"
+    path.write_bytes(b"placeholder")
+    page = material_extraction.ExtractedPage(
+        number=1,
+        text="这是一页内容清晰且长度足够的劳动合同正文。" * 10,
+        risk_score=0.1,
+        used_ocr=False,
+    )
+    monkeypatch.setattr(material_extraction, "extract_material_pages", lambda *_args, **_kwargs: [page])
+    calls: list[str] = []
+
+    async def fake_vision(**_kwargs):
+        calls.append("vision")
+        return {"corrected_text": "不应调用"}
+
+    result = asyncio.run(material_extraction.extract_material_with_vision(path, vision_complete=fake_vision))
+
+    assert "劳动合同正文" in result.text
+    assert result.vision_reviewed_pages == ()
+    assert calls == []
+
+
+def test_high_risk_page_uses_visual_correction(tmp_path: Path, monkeypatch):
+    path = tmp_path / "scan.png"
+    path.write_bytes(b"placeholder")
+    page = material_extraction.ExtractedPage(
+        number=1,
+        text="仲栽金额1B00元",
+        risk_score=0.9,
+        used_ocr=True,
+        image_bytes=b"image-bytes",
+        image_mime_type="image/jpeg",
+    )
+    monkeypatch.setattr(material_extraction, "extract_material_pages", lambda *_args, **_kwargs: [page])
+
+    async def fake_vision(**kwargs):
+        assert kwargs["image_bytes"] == b"image-bytes"
+        assert "仲栽金额1B00元" in kwargs["user"]
+        return {"corrected_text": "仲裁金额1800元", "uncertain_fragments": []}
+
+    result = asyncio.run(material_extraction.extract_material_with_vision(path, vision_complete=fake_vision))
+
+    assert "仲裁金额1800元" in result.text
+    assert "仲栽金额1B00元" not in result.text
+    assert result.vision_reviewed_pages == (1,)
+
+
+def test_visual_failure_keeps_ocr_text(tmp_path: Path, monkeypatch):
+    path = tmp_path / "scan.png"
+    path.write_bytes(b"placeholder")
+    page = material_extraction.ExtractedPage(
+        number=1,
+        text="原始OCR文字",
+        risk_score=0.9,
+        used_ocr=True,
+        image_bytes=b"image-bytes",
+        image_mime_type="image/jpeg",
+    )
+    monkeypatch.setattr(material_extraction, "extract_material_pages", lambda *_args, **_kwargs: [page])
+
+    async def failed_vision(**_kwargs):
+        raise RuntimeError("两个视觉模型均不可用")
+
+    result = asyncio.run(material_extraction.extract_material_with_vision(path, vision_complete=failed_vision))
+
+    assert "原始OCR文字" in result.text
+    assert result.vision_reviewed_pages == ()
