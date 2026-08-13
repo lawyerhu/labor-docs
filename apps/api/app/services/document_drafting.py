@@ -6,6 +6,34 @@ from typing import Any
 from app.services.openai_compat import complete_json
 
 
+MAX_DRAFT_MATERIAL_CHARS = 12_000
+_CASE_DATA_KEYS = (
+    "parties",
+    "court",
+    "employment_facts",
+    "arbitration",
+    "intake",
+    "analysis",
+    "claims",
+)
+
+
+def compact_case_for_draft(case: dict[str, Any]) -> dict[str, Any]:
+    data = case.get("data") if isinstance(case.get("data"), dict) else {}
+    compact_data = {
+        key: data[key]
+        for key in _CASE_DATA_KEYS
+        if data.get(key) not in (None, "", [], {})
+    }
+    return {
+        "id": case.get("id"),
+        "title": case.get("title"),
+        "case_stage": case.get("case_stage"),
+        "party_side": case.get("party_side"),
+        "data": compact_data,
+    }
+
+
 async def draft_case_documents(
     *,
     case: dict[str, Any],
@@ -20,7 +48,7 @@ async def draft_case_documents(
                 "current_name": item.get("name"),
                 "current_source": item.get("source"),
                 "current_purpose": item.get("purpose"),
-                "material_text": material_texts.get(item["id"], "")[:45_000],
+                "material_text": material_texts.get(item["id"], "")[:MAX_DRAFT_MATERIAL_CHARS],
             }
         )
     parsed = await complete_json(
@@ -37,8 +65,8 @@ evidence_items：逐项返回 id、name、source、purpose。name按材料内容
 verified_law：只能使用输入中已标记 verified=true 且能从来源内容核对的法条。无法核验时不写具体条号，可在事实理由末尾使用[待核验法律依据]。
 missing_fields：仅列影响提交或诉请计算且无法从材料得出的关键信息。不要为可由正文自然表述的信息制造占位符。
 语气专业克制，避免“保证胜诉”等结论。""",
-        user=json.dumps({"case": case, "evidence": evidence}, ensure_ascii=False),
-        timeout=180,
+        user=json.dumps({"case": compact_case_for_draft(case), "evidence": evidence}, ensure_ascii=False),
+        timeout=120,
     )
     claims = [str(value).strip() for value in parsed.get("claims") or [] if str(value).strip()]
     facts = [str(value).strip() for value in parsed.get("facts_and_reasons") or [] if str(value).strip()]

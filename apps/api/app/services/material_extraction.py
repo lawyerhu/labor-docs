@@ -18,18 +18,56 @@ from app.config import get_settings
 
 MAX_EXTRACTED_CHARS = 120_000
 DEFAULT_OCR_RENDER_SCALE = 2.2
-MAX_OCR_RENDER_PIXELS = 4_000_000
+FAST_OCR_RENDER_PIXELS = 800_000
+MAX_OCR_RENDER_PIXELS = 2_000_000
+MIN_USEFUL_OCR_CHARS = 40
+TESSERACT_CONFIG = "--oem 1 --psm 6 -c tessedit_do_invert=0"
 ExtractionProgress = Callable[[int, int], None]
 
 
 def _ocr_image(image: Image.Image) -> str:
-    return pytesseract.image_to_string(image.convert("RGB"), lang="chi_sim+eng").strip()
+    prepared = image.convert("L")
+    try:
+        return pytesseract.image_to_string(
+            prepared,
+            lang="chi_sim",
+            config=TESSERACT_CONFIG,
+        ).strip()
+    finally:
+        if prepared is not image:
+            prepared.close()
 
 
-def _bounded_ocr_scale(width: float, height: float) -> float:
+def _bounded_ocr_scale(width: float, height: float, max_pixels: int = MAX_OCR_RENDER_PIXELS) -> float:
     if width <= 0 or height <= 0:
         return DEFAULT_OCR_RENDER_SCALE
-    return min(DEFAULT_OCR_RENDER_SCALE, sqrt(MAX_OCR_RENDER_PIXELS / (width * height)))
+    return min(DEFAULT_OCR_RENDER_SCALE, sqrt(max_pixels / (width * height)))
+
+
+def _ocr_resized(image: Image.Image, scale: float) -> str:
+    if scale >= 1:
+        return _ocr_image(image)
+    resized = image.resize((max(1, int(image.width * scale)), max(1, int(image.height * scale))))
+    try:
+        return _ocr_image(resized)
+    finally:
+        resized.close()
+
+
+def _ocr_pdf_page(pdf_page: pdfium.PdfPage, max_pixels: int) -> str:
+    width, height = pdf_page.get_size()
+    rendered = pdf_page.render(scale=_bounded_ocr_scale(width, height, max_pixels)).to_pil()
+    try:
+        return _ocr_image(rendered)
+    finally:
+        rendered.close()
+
+
+def _adaptive_ocr_text(first_pass: str, retry: Callable[[], str]) -> str:
+    if len(first_pass) >= MIN_USEFUL_OCR_CHARS:
+        return first_pass
+    retry_text = retry()
+    return retry_text if len(retry_text) > len(first_pass) else first_pass
 
 
 def _extract_pdf(path: Path, progress_callback: ExtractionProgress | None = None) -> str:
@@ -39,25 +77,25 @@ def _extract_pdf(path: Path, progress_callback: ExtractionProgress | None = None
     for index, page in enumerate(reader.pages):
         text = (page.extract_text() or "").strip()
         texts.append(text)
-        if len(text) < 40:
+        if len(text) < MIN_USEFUL_OCR_CHARS:
             weak_pages.append(index)
     if weak_pages:
         document = pdfium.PdfDocument(str(path))
         try:
             total = len(weak_pages)
             for completed, index in enumerate(weak_pages, start=1):
+                if progress_callback:
+                    progress_callback(completed, total)
                 pdf_page = document[index]
-                width, height = pdf_page.get_size()
-                rendered = pdf_page.render(scale=_bounded_ocr_scale(width, height)).to_pil()
                 try:
-                    ocr_text = _ocr_image(rendered)
+                    ocr_text = _adaptive_ocr_text(
+                        _ocr_pdf_page(pdf_page, FAST_OCR_RENDER_PIXELS),
+                        lambda current=pdf_page: _ocr_pdf_page(current, MAX_OCR_RENDER_PIXELS),
+                    )
                 finally:
-                    rendered.close()
                     pdf_page.close()
                 if len(ocr_text) > len(texts[index]):
                     texts[index] = ocr_text
-                if progress_callback:
-                    progress_callback(completed, total)
         finally:
             document.close()
     return "\n\n".join(f"--- 第{index + 1}页 ---\n{text}" for index, text in enumerate(texts))
@@ -109,10 +147,23 @@ def extract_material_text(path: Path, progress_callback: ExtractionProgress | No
     if suffix == ".pdf":
         text = _extract_pdf(path, progress_callback)
     elif suffix in {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}:
-        with Image.open(path) as image:
-            text = _ocr_image(image)
         if progress_callback:
             progress_callback(1, 1)
+        with Image.open(path) as image:
+            width, height = image.size
+            fast_scale = _bounded_ocr_scale(width, height, FAST_OCR_RENDER_PIXELS)
+            if fast_scale < 1:
+                fast = image.resize((max(1, int(width * fast_scale)), max(1, int(height * fast_scale))))
+                retry_scale = _bounded_ocr_scale(width, height, MAX_OCR_RENDER_PIXELS)
+                try:
+                    text = _adaptive_ocr_text(
+                        _ocr_image(fast),
+                        lambda source=image, scale=retry_scale: _ocr_resized(source, scale),
+                    )
+                finally:
+                    fast.close()
+            else:
+                text = _ocr_image(image)
     elif suffix == ".docx":
         text = _extract_docx(path)
     elif suffix in {".doc", ".xls", ".xlsx"}:

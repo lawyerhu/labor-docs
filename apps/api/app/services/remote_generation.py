@@ -69,6 +69,26 @@ def _s3_object_key(stored_path: str) -> str:
     return stored_path[len(prefix) :]
 
 
+async def _cache_extracted_text(case_id: str, evidence_id: str, analysis: dict[str, Any], text: str) -> None:
+    settings = get_settings()
+    worker_url = (settings.worker_internal_url or "").rstrip("/")
+    if not worker_url:
+        return
+    headers = {"Content-Type": "application/json"}
+    if settings.worker_internal_token:
+        headers["X-Internal-Token"] = settings.worker_internal_token
+    payload = {**analysis, "extracted_text": text}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                f"{worker_url}/api/internal/cases/{quote(case_id, safe='')}/evidence/{quote(evidence_id, safe='')}/analysis",
+                headers=headers,
+                json={"analysis": payload},
+            )
+    except httpx.HTTPError:
+        return
+
+
 async def _report_progress(job_id: str, stage: str, progress: int) -> None:
     settings = get_settings()
     worker_url = (settings.worker_internal_url or "").rstrip("/")
@@ -211,6 +231,7 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
                     time.perf_counter() - started,
                     len(material_texts[evidence_id]),
                 )
+                await _cache_extracted_text(case_id, evidence_id, analysis, material_texts[evidence_id])
             evidence_items.append(
                 {
                     "id": evidence_id,

@@ -97,5 +97,6 @@ async def complete_json(*, system: str, user: str, timeout: float = 60) -> dict[
             headers={"Authorization": f"Bearer {settings.openai_api_key}"},
             json=body,
         )
-        response.raise_for_status()
+    if response.status_code >= 400:
+        raise RuntimeError(f"模型接口返回 {response.status_code}")
     return parse_json_text(response_text(response.json()))

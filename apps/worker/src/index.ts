@@ -784,6 +784,41 @@ async function deleteEvidence(request: Request, env: Env, caseId: string, eviden
   return new Response(null, { status: 204 });
 }
 
+async function markGenerationJobFailed(env: Env, jobId: string, caseId: string | null, error: string): Promise<void> {
+  const now = new Date().toISOString();
+  const statements = [
+    env.DB.prepare(
+      "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ? AND status != 'completed'",
+    ).bind(error.slice(0, 2000), now, jobId),
+  ];
+  if (caseId) {
+    statements.push(
+      env.DB.prepare(
+        "UPDATE cases SET status = 'ready_to_generate' WHERE id = ? AND NOT EXISTS (SELECT 1 FROM generation_jobs WHERE case_id = ? AND id != ? AND status IN ('queued', 'dispatched', 'running', 'finalizing'))",
+      ).bind(caseId, caseId, jobId),
+    );
+  }
+  await env.DB.batch(statements);
+}
+
+async function cacheEvidenceAnalysis(request: Request, env: Env, caseId: string, evidenceId: string): Promise<Response> {
+  if (!isAuthorized(request, env)) return json({ detail: "未授权" }, { status: 401 });
+  let body: { analysis?: unknown };
+  try { body = await request.json() as typeof body; } catch { return json({ detail: "请求体必须是 JSON" }, { status: 400 }); }
+  if (!body.analysis || typeof body.analysis !== "object" || Array.isArray(body.analysis)) {
+    return json({ detail: "分析缓存无效" }, { status: 400 });
+  }
+  const existing = await env.DB.prepare("SELECT analysis_json FROM evidence WHERE id = ? AND case_id = ?")
+    .bind(evidenceId, caseId)
+    .first<{ analysis_json: string }>();
+  if (!existing) return json({ detail: "证据不存在" }, { status: 404 });
+  const merged = { ...parseCaseData(existing.analysis_json), ...(body.analysis as Record<string, unknown>) };
+  await env.DB.prepare("UPDATE evidence SET analysis_json = ? WHERE id = ? AND case_id = ?")
+    .bind(JSON.stringify(merged), evidenceId, caseId)
+    .run();
+  return json({ status: "ok" });
+}
+
 async function failStaleGenerationJobs(env: Env, caseId: string): Promise<void> {
   const staleBefore = new Date(Date.now() - GENERATION_STALE_MS).toISOString();
   const now = new Date().toISOString();
@@ -827,8 +862,7 @@ async function generateCase(request: Request, env: Env, caseId: string): Promise
   try {
     await env.GENERATION_QUEUE.send({ version: 1, job_id: jobId, case_id: caseId, requested_at: now });
   } catch (error) {
-    await env.DB.prepare("UPDATE generation_jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?")
-      .bind(`入队失败：${String(error)}`.slice(0, 2000), new Date().toISOString(), jobId).run();
+    await markGenerationJobFailed(env, jobId, caseId, `入队失败：${String(error)}`);
     return json({ detail: "生成任务入队失败", job_id: jobId }, { status: 503 });
   }
   return json({ job_id: jobId, status: "queued" }, { status: 202 });
@@ -952,11 +986,7 @@ async function enqueueGeneration(request: Request, env: Env): Promise<Response> 
       requested_at: now,
     });
   } catch (error) {
-    await env.DB.prepare(
-      "UPDATE generation_jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
-    )
-      .bind(`入队失败：${String(error)}`.slice(0, 2000), new Date().toISOString(), jobId)
-      .run();
+    await markGenerationJobFailed(env, jobId, caseId, `入队失败：${String(error)}`);
     return json({ detail: "生成任务入队失败", job_id: jobId }, { status: 503 });
   }
 
@@ -1196,9 +1226,7 @@ async function receiveGenerationResult(request: Request, env: Env, jobId: string
 
   if (body.status === "failed") {
     const error = typeof body.error === "string" ? body.error.slice(0, 1000) : "文书生成失败";
-    await env.DB.prepare(
-      "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ? AND case_id = ? AND status != 'completed'",
-    ).bind(error, new Date().toISOString(), jobId, caseId).run();
+    await markGenerationJobFailed(env, jobId, caseId, error);
     return json({ status: "ok" });
   }
   if (body.status !== "completed") return json({ detail: "无效的生成状态" }, { status: 400 });
@@ -1207,9 +1235,7 @@ async function receiveGenerationResult(request: Request, env: Env, jobId: string
     await finalizeGenerationResult(env, jobId, caseId, body.result);
   } catch (error) {
     const detail = String(error).slice(0, 1000);
-    await env.DB.prepare(
-      "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ? AND case_id = ? AND status != 'completed'",
-    ).bind(detail, new Date().toISOString(), jobId, caseId).run();
+    await markGenerationJobFailed(env, jobId, caseId, detail);
     return json({ detail }, { status: 400 });
   }
   return json({ status: "ok" });
@@ -1224,11 +1250,7 @@ async function dispatchGeneration(message: Message<GenerationMessage>, env: Env)
 
   const generatorUrl = env.GENERATOR_URL?.trim();
   if (!generatorUrl) {
-    await env.DB.prepare(
-      "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ?",
-    )
-      .bind("生成服务地址未配置", new Date().toISOString(), jobId)
-      .run();
+    await markGenerationJobFailed(env, jobId, caseId, "生成服务地址未配置");
     message.ack();
     return;
   }
@@ -1246,11 +1268,7 @@ async function dispatchGeneration(message: Message<GenerationMessage>, env: Env)
       body: JSON.stringify({ version: 1, job_id: jobId, case_id: caseId }),
     });
   } catch (error) {
-    await env.DB.prepare(
-      "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ?",
-    )
-      .bind(`生成服务不可达：${String(error)}`.slice(0, 2000), new Date().toISOString(), jobId)
-      .run();
+    await markGenerationJobFailed(env, jobId, caseId, `生成服务不可达：${String(error)}`);
     throw error;
   }
 
@@ -1261,11 +1279,7 @@ async function dispatchGeneration(message: Message<GenerationMessage>, env: Env)
       const parsed = JSON.parse(body) as { detail?: unknown };
       if (typeof parsed.detail === "string") detail = parsed.detail;
     } catch { /* keep the safe response body */ }
-    await env.DB.prepare(
-      "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ?",
-    )
-      .bind(`生成服务返回 ${response.status}：${detail}`, new Date().toISOString(), jobId)
-      .run();
+    await markGenerationJobFailed(env, jobId, caseId, `生成服务返回 ${response.status}：${detail}`);
     if (response.status >= 400 && response.status < 500) {
       message.ack();
       return;
@@ -1277,11 +1291,7 @@ async function dispatchGeneration(message: Message<GenerationMessage>, env: Env)
   try {
     responseBody = (await response.json()) as { status?: unknown; result?: unknown };
   } catch {
-    await env.DB.prepare(
-      "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ?",
-    )
-      .bind("生成服务返回格式错误", new Date().toISOString(), jobId)
-      .run();
+    await markGenerationJobFailed(env, jobId, caseId, "生成服务返回格式错误");
     message.ack();
     return;
   }
@@ -1290,9 +1300,7 @@ async function dispatchGeneration(message: Message<GenerationMessage>, env: Env)
     try {
       await finalizeGenerationResult(env, jobId, caseId, responseBody.result);
     } catch (error) {
-      await env.DB.prepare(
-        "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ? AND status != 'completed'",
-      ).bind(String(error).slice(0, 1000), new Date().toISOString(), jobId).run();
+      await markGenerationJobFailed(env, jobId, caseId, String(error));
     }
   } else {
     await env.DB.prepare(
@@ -1436,6 +1444,16 @@ export default {
     const generationInputMatch = url.pathname.match(/^\/api\/internal\/cases\/([^/]+)\/generation-input$/);
     if (request.method === "GET" && generationInputMatch) {
       return getGenerationInput(request, env, decodeURIComponent(generationInputMatch[1]));
+    }
+
+    const evidenceAnalysisMatch = url.pathname.match(/^\/api\/internal\/cases\/([^/]+)\/evidence\/([^/]+)\/analysis$/);
+    if (request.method === "POST" && evidenceAnalysisMatch) {
+      return cacheEvidenceAnalysis(
+        request,
+        env,
+        decodeURIComponent(evidenceAnalysisMatch[1]),
+        decodeURIComponent(evidenceAnalysisMatch[2]),
+      );
     }
 
     return json({ detail: "Cloudflare Worker API迁移中" }, { status: 501 });
