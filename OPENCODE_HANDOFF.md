@@ -1,7 +1,7 @@
 # OpenCode 项目交接：劳动文书助手
 
-更新时间：2026-08-13  
-当前分支：`main`  
+更新时间：2026-08-13
+当前分支：`main`
 交接基线提交：`5ecde47 Speed up scanned evidence generation`
 
 ## 1. 接手目标
