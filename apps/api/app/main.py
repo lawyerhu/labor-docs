@@ -108,7 +108,6 @@ def _evidence_payload(item: EvidenceRecord) -> dict:
         "id": item.id,
         "original_name": item.original_name,
         "name": item.name,
-        "source": item.source,
         "purpose": item.purpose,
         "mime_type": item.mime_type,
         "size_bytes": item.size_bytes,
@@ -423,7 +422,7 @@ def create_app() -> FastAPI:
         item = db.scalar(select(EvidenceRecord).where(EvidenceRecord.id == evidence_id, EvidenceRecord.case_id == case.id))
         if not item:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "证据不存在")
-        for field in ("name", "source", "purpose"):
+        for field in ("name", "purpose"):
             value = getattr(payload, field)
             if value is not None:
                 setattr(item, field, value)

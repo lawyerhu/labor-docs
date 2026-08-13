@@ -237,7 +237,6 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
                     "id": evidence_id,
                     "original_name": item.get("original_name") or "材料",
                     "name": item.get("name") or item.get("original_name") or "材料",
-                    "source": item.get("source") or "",
                     "purpose": item.get("purpose") or "",
                     "stored_path": str(processing_path),
                     "analysis": analysis,

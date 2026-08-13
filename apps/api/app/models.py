@@ -67,7 +67,6 @@ class EvidenceRecord(Base):
     case_id: Mapped[str] = mapped_column(ForeignKey("cases.id", ondelete="CASCADE"), index=True)
     original_name: Mapped[str] = mapped_column(String(255))
     name: Mapped[str] = mapped_column(String(255))
-    source: Mapped[str] = mapped_column(String(255), default="")
     purpose: Mapped[str] = mapped_column(Text, default="")
     stored_path: Mapped[str] = mapped_column(Text)
     mime_type: Mapped[str] = mapped_column(String(100))

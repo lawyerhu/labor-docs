@@ -479,7 +479,6 @@ type EvidenceRow = {
   id: string;
   original_name: string;
   name: string;
-  source: string;
   purpose: string;
   object_key: string;
   mime_type: string;
@@ -546,7 +545,6 @@ function evidencePayload(item: EvidenceRow) {
     id: item.id,
     original_name: item.original_name,
     name: item.name,
-    source: item.source,
     purpose: item.purpose,
     mime_type: item.mime_type,
     size_bytes: item.size_bytes,
@@ -575,7 +573,7 @@ async function casePayload(env: Env, row: CaseRow, user?: PublicUser) {
   const readiness = readinessFor(row, data);
   const [evidence, artifacts] = await Promise.all([
     env.DB.prepare(
-      "SELECT id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, processing_stage, processing_progress, analysis_json, created_at FROM evidence WHERE case_id = ? ORDER BY created_at, id",
+      "SELECT id, original_name, name, purpose, object_key, mime_type, size_bytes, sha256, status, processing_stage, processing_progress, analysis_json, created_at FROM evidence WHERE case_id = ? ORDER BY created_at, id",
     ).bind(row.id).all<EvidenceRow>(),
     env.DB.prepare(
       "SELECT id, filename, kind, created_at FROM artifacts WHERE case_id = ? ORDER BY created_at, id",
@@ -737,13 +735,13 @@ async function uploadEvidence(request: Request, env: Env, caseId: string): Promi
   const now = new Date().toISOString();
   const row: EvidenceRow = {
     id, original_name: value.name.slice(0, 255), name: "材料识别中",
-    source: "", purpose: "", object_key: key, mime_type: value.type || "application/octet-stream",
+    purpose: "", object_key: key, mime_type: value.type || "application/octet-stream",
     size_bytes: value.size, sha256: await sha256Hex(bytes), status: "processing",
     processing_stage: "queued", processing_progress: 10, analysis_json: "{}", created_at: now,
   };
   await env.DB.batch([
-    env.DB.prepare("INSERT INTO evidence (id, case_id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, processing_stage, processing_progress, analysis_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(row.id, caseId, row.original_name, row.name, row.source, row.purpose, row.object_key, row.mime_type, row.size_bytes, row.sha256, row.status, row.processing_stage, row.processing_progress, row.analysis_json, row.created_at),
+    env.DB.prepare("INSERT INTO evidence (id, case_id, original_name, name, purpose, object_key, mime_type, size_bytes, sha256, status, processing_stage, processing_progress, analysis_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(row.id, caseId, row.original_name, row.name, row.purpose, row.object_key, row.mime_type, row.size_bytes, row.sha256, row.status, row.processing_stage, row.processing_progress, row.analysis_json, row.created_at),
     env.DB.prepare("UPDATE cases SET status = 'materials_processing' WHERE id = ?").bind(caseId),
   ]);
   try {
@@ -759,18 +757,17 @@ async function uploadEvidence(request: Request, env: Env, caseId: string): Promi
 async function updateEvidence(request: Request, env: Env, caseId: string, evidenceId: string): Promise<Response> {
   const owned = await ownedCase(request, env, caseId);
   if (owned instanceof Response) return owned;
-  let body: { name?: unknown; source?: unknown; purpose?: unknown };
+  let body: { name?: unknown; purpose?: unknown };
   try { body = await request.json() as typeof body; } catch { return json({ detail: "请求体必须是 JSON" }, { status: 400 }); }
-  const row = await env.DB.prepare("SELECT id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, processing_stage, processing_progress, analysis_json, created_at FROM evidence WHERE id = ? AND case_id = ?")
+  const row = await env.DB.prepare("SELECT id, original_name, name, purpose, object_key, mime_type, size_bytes, sha256, status, processing_stage, processing_progress, analysis_json, created_at FROM evidence WHERE id = ? AND case_id = ?")
     .bind(evidenceId, caseId).first<EvidenceRow>();
   if (!row) return json({ detail: "证据不存在" }, { status: 404 });
   const next = {
     name: typeof body.name === "string" ? body.name.trim().slice(0, 255) : row.name,
-    source: typeof body.source === "string" ? body.source.trim().slice(0, 255) : row.source,
     purpose: typeof body.purpose === "string" ? body.purpose.trim().slice(0, 2000) : row.purpose,
   };
-  await env.DB.prepare("UPDATE evidence SET name = ?, source = ?, purpose = ? WHERE id = ? AND case_id = ?")
-    .bind(next.name, next.source, next.purpose, evidenceId, caseId).run();
+  await env.DB.prepare("UPDATE evidence SET name = ?, purpose = ? WHERE id = ? AND case_id = ?")
+    .bind(next.name, next.purpose, evidenceId, caseId).run();
   return json({ ...row, ...next });
 }
 
@@ -1023,14 +1020,13 @@ async function getGenerationInput(request: Request, env: Env, caseId: string): P
   }
 
   const evidence = await env.DB.prepare(
-    "SELECT id, original_name, name, source, purpose, object_key, mime_type, size_bytes, sha256, status, processing_stage, processing_progress, analysis_json, created_at FROM evidence WHERE case_id = ? ORDER BY created_at, id",
+    "SELECT id, original_name, name, purpose, object_key, mime_type, size_bytes, sha256, status, processing_stage, processing_progress, analysis_json, created_at FROM evidence WHERE case_id = ? ORDER BY created_at, id",
   )
     .bind(caseId)
     .all<{
       id: string;
       original_name: string;
       name: string;
-      source: string;
       purpose: string;
       object_key: string;
       mime_type: string;
@@ -1120,13 +1116,12 @@ async function dispatchEvidenceAnalysis(message: Message<EvidenceAnalysisMessage
     }
     throw new Error(`evidence analyzer returned ${response.status}`);
   }
-  const result = await response.json() as { name?: unknown; source?: unknown; purpose?: unknown; analysis?: unknown };
+  const result = await response.json() as { name?: unknown; purpose?: unknown; analysis?: unknown };
   const name = typeof result.name === "string" ? result.name.trim().slice(0, 255) : "材料";
-  const source = typeof result.source === "string" ? result.source.trim().slice(0, 255) : "[待核实来源]";
   const purpose = typeof result.purpose === "string" ? result.purpose.trim().slice(0, 2000) : "[待核实证明目的]";
   await env.DB.batch([
-    env.DB.prepare("UPDATE evidence SET name = ?, source = ?, purpose = ?, status = 'ready', processing_stage = 'complete', processing_progress = 100, analysis_json = ? WHERE id = ? AND case_id = ?")
-      .bind(name || "材料", source, purpose, JSON.stringify(result.analysis || {}), evidenceId, caseId),
+    env.DB.prepare("UPDATE evidence SET name = ?, purpose = ?, status = 'ready', processing_stage = 'complete', processing_progress = 100, analysis_json = ? WHERE id = ? AND case_id = ?")
+      .bind(name || "材料", purpose, JSON.stringify(result.analysis || {}), evidenceId, caseId),
     env.DB.prepare("UPDATE cases SET status = CASE WHEN NOT EXISTS (SELECT 1 FROM evidence WHERE case_id = ? AND status = 'processing' AND id <> ?) THEN 'ready_to_generate' ELSE status END WHERE id = ?")
       .bind(caseId, evidenceId, caseId),
   ]);
@@ -1149,15 +1144,14 @@ async function finalizeGenerationResult(
   const evidenceUpdates = Array.isArray((result as { evidence_updates?: unknown }).evidence_updates)
     ? (result as { evidence_updates: unknown[] }).evidence_updates.flatMap((item) => {
       if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-      const candidate = item as { id?: unknown; name?: unknown; source?: unknown; purpose?: unknown; analysis?: unknown };
+      const candidate = item as { id?: unknown; name?: unknown; purpose?: unknown; analysis?: unknown };
       const id = typeof candidate.id === "string" ? candidate.id : "";
       const name = typeof candidate.name === "string" ? candidate.name.trim().slice(0, 255) : "";
-      const source = typeof candidate.source === "string" ? candidate.source.trim().slice(0, 255) : "";
       const purpose = typeof candidate.purpose === "string" ? candidate.purpose.trim().slice(0, 2000) : "";
       const analysis = candidate.analysis && typeof candidate.analysis === "object" && !Array.isArray(candidate.analysis)
         ? candidate.analysis as Record<string, unknown>
         : null;
-      return id && name && source && purpose ? [{ id, name, source, purpose, analysis }] : [];
+      return id && name && purpose ? [{ id, name, purpose, analysis }] : [];
     })
     : [];
   const artifacts = rawArtifacts.flatMap((item) => {
@@ -1194,10 +1188,9 @@ async function finalizeGenerationResult(
     env.DB.prepare("UPDATE cases SET status = 'generated', generation_count = generation_count + 1 WHERE id = ?")
       .bind(caseId),
     ...evidenceUpdates.map((item) =>
-      env.DB.prepare("UPDATE evidence SET name = ?, source = ?, purpose = ?, analysis_json = CASE WHEN ? IS NULL THEN analysis_json ELSE ? END WHERE id = ? AND case_id = ?")
+      env.DB.prepare("UPDATE evidence SET name = ?, purpose = ?, analysis_json = CASE WHEN ? IS NULL THEN analysis_json ELSE ? END WHERE id = ? AND case_id = ?")
         .bind(
           item.name,
-          item.source,
           item.purpose,
           item.analysis ? JSON.stringify(item.analysis) : null,
           item.analysis ? JSON.stringify(item.analysis) : null,

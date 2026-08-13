@@ -5,7 +5,6 @@ export interface EvidenceItem {
   id: string;
   original_name: string;
   name: string;
-  source: string;
   purpose: string;
   size_bytes: number;
   status: string;

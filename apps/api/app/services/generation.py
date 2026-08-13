@@ -31,7 +31,6 @@ def run_generation(db: Session, case: CaseRecord) -> dict:
                 "id": item.id,
                 "original_name": item.original_name,
                 "name": item.name,
-                "source": item.source,
                 "purpose": item.purpose,
                 "stored_path": str(processing_path),
             }

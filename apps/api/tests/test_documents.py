@@ -52,8 +52,8 @@ def test_evidence_package_uses_actual_files_and_continuous_pages(tmp_path: Path)
         case_id="case-evidence",
         payload={"case_stage": "arbitration", "party_side": "worker", "data": {}},
         evidence_items=[
-            {"id": "a", "name": "劳动合同", "source": "双方签署", "purpose": "证明劳动关系。", "stored_path": str(source_a)},
-            {"id": "b", "name": "工资记录", "source": "银行", "purpose": "证明工资标准。", "stored_path": str(source_b)},
+             {"id": "a", "name": "劳动合同", "purpose": "证明劳动关系。", "stored_path": str(source_a)},
+             {"id": "b", "name": "工资记录", "purpose": "证明工资标准。", "stored_path": str(source_b)},
         ],
         output_dir=tmp_path,
     )
@@ -64,6 +64,7 @@ def test_evidence_package_uses_actual_files_and_continuous_pages(tmp_path: Path)
     assert len(reader.pages) == 3
     assert len(reader.outline) == 2
     catalog = Document(tmp_path / "case-evidence" / "02-证据目录.docx")
+    assert [cell.text for cell in catalog.tables[0].rows[0].cells] == ["证据编号", "证据名称", "证明目的", "页码"]
     assert len(catalog.tables[0].rows) == 3
     assert catalog.sections[0].page_width > catalog.sections[0].page_height
     assert result.readiness == "formal_with_placeholders"
@@ -73,7 +74,7 @@ def test_litigation_package_uses_ai_draft_in_both_complaints(tmp_path: Path):
     data = {
         "_ai_draft": {
             "claims": ["判令被告向原告支付拖欠工资人民币12,000元。"],
-            "facts_and_reasons": ["原告与被告存在劳动关系，被告尚欠原告工资人民币12,000元。"],
+            "facts_and_reasons": ["劳动关系：原告与被告存在劳动关系，被告尚欠原告工资人民币12,000元。"],
         }
     }
     result = build_case_package(
@@ -88,6 +89,7 @@ def test_litigation_package_uses_ai_draft_in_both_complaints(tmp_path: Path):
     for filename in ("01A-民事起诉状（要素式）.docx", "01B-民事起诉状（普通式）.docx"):
         text = _all_text(case_dir / filename)
         assert "拖欠工资人民币12,000元" in text
+        assert "劳动关系：" not in text
         assert "[待填入：诉讼请求]" not in text
 
 
@@ -102,7 +104,6 @@ def test_evidence_package_converts_images_to_continuous_pdf(tmp_path: Path):
             {
                 "id": "image",
                 "name": "聊天截图",
-                "source": "当事人提供",
                 "purpose": "证明沟通内容。",
                 "stored_path": str(image),
             }

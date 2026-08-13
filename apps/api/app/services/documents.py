@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 import shutil
 import subprocess
 import tempfile
@@ -27,6 +28,19 @@ from app.domain.readiness import assess_readiness
 
 
 PLACEHOLDER_COLOR = RGBColor(180, 45, 35)
+FACT_HEADING_RE = re.compile(
+    r"^(?:[一二三四五六七八九十]+、|\d+[\.、]|[（(][一二三四五六七八九十\d]+[)）])?"
+    r"\s*(劳动关系|争议发生|仲裁前置|起诉理由|法律理由)\s*[：:、.]?\s*"
+)
+
+
+def _strip_fact_heading(value: Any) -> str:
+    text = str(value or "").strip()
+    previous = None
+    while previous != text:
+        previous = text
+        text = FACT_HEADING_RE.sub("", text).strip()
+    return text
 
 
 @dataclass(frozen=True)
@@ -173,7 +187,7 @@ def _claim_lines(data: dict[str, Any], stage: str) -> list[str]:
 def _fact_text(data: dict[str, Any], stage: str) -> list[str]:
     drafted = (data.get("_ai_draft") or {}).get("facts_and_reasons") or []
     if drafted:
-        return [str(item) for item in drafted]
+        return [_strip_fact_heading(item) for item in drafted if _strip_fact_heading(item)]
     employment = data.get("employment_facts") or {}
     facts = [
         f"申请人/原告于{employment.get('start_date') or '[待填入：入职日期]'}入职，"
@@ -427,10 +441,10 @@ def _build_catalog(path: Path, evidence: list[dict[str, Any]], page_ranges: list
     document = Document()
     _configure_document(document, landscape=True)
     _title(document, "证据目录")
-    headers = ["证据编号", "证据名称", "来源", "证明目的", "页码"]
-    table = document.add_table(rows=1, cols=5)
+    headers = ["证据编号", "证据名称", "证明目的", "页码"]
+    table = document.add_table(rows=1, cols=4)
     table.style = "Table Grid"
-    _set_table_geometry(table, [2.2, 5, 4.2, 11.5, 2.5])
+    _set_table_geometry(table, [2.4, 6.4, 14.1, 2.5])
     for index, value in enumerate(headers):
         _set_cell(table.cell(0, index), value, bold=True, center=True)
     for row_index, item in enumerate(evidence, start=1):
@@ -438,12 +452,11 @@ def _build_catalog(path: Path, evidence: list[dict[str, Any]], page_ranges: list
         values = [
             str(row_index),
             item.get("name") or "[待核实：证据名称]",
-            item.get("source") or "[待核实：来源]",
             item.get("purpose") or "[待核实：证明目的]",
             page_ranges[row_index - 1],
         ]
         for index, value in enumerate(values):
-            _set_cell(cells[index], str(value), center=index in {0, 4})
+            _set_cell(cells[index], str(value), center=index in {0, 3})
     document.core_properties.title = "证据目录"
     document.save(path)
 

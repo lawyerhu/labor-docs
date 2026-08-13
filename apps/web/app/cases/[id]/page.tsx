@@ -196,12 +196,12 @@ export default function CaseWorkspacePage() {
       <div className="analysis-card">
         <div className="eyebrow"><span /> 大模型全案撰写</div>
         <h1>上传现有材料，直接生成</h1>
-        <p>{summary || "不必先填写大量表格。系统会阅读案情说明和全部材料，形成诉请、事实理由、证据名称、来源与证明目的。"}</p>
+        <p>{summary || "不必先填写大量表格。系统会阅读案情说明和全部材料，形成诉请、事实理由、证据名称与证明目的。"}</p>
         <div className="analysis-done"><Check size={18} /> 缺失内容只在确有必要时标为“待填入”，不会阻止生成。</div>
       </div>
 
       <div className="evidence-card">
-        <div><div className="eyebrow"><span /> 材料识别</div><h2>上传你实际持有的材料</h2><p>大模型阅读内容后命名证据并填写来源、证明目的；随后按连续页码统一排版。</p></div>
+        <div><div className="eyebrow"><span /> 材料识别</div><h2>上传你实际持有的材料</h2><p>大模型阅读内容后命名证据并填写证明目的；随后按连续页码统一排版。</p></div>
         <button className="upload-zone" onClick={() => fileRef.current?.click()} disabled={busy}><UploadCloud size={25} /><strong>选择材料</strong><span>PDF、图片、Word、Excel；单个不超过 50MB</span><input ref={fileRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx" onChange={(event) => uploadFiles(event.target.files)} hidden /></button>
         {Object.entries(uploads).map(([name, progress]) => <ProgressBlock key={name} label={`正在上传：${name}`} progress={progress} />)}
         {!record.evidence?.length
@@ -212,7 +212,7 @@ export default function CaseWorkspacePage() {
 
       <div className="generation-card">
         <div><div className="eyebrow"><span /> 全案生成</div><h2>大模型撰写，程序确定排版</h2></div>
-        <div className="output-preview"><OutputRow name={record.case_stage === "litigation" ? "民事起诉状（要素式、普通式）" : "劳动人事争议仲裁申请书"} type="DOCX" /><OutputRow name="证据目录（横向五列）" type="DOCX" /><OutputRow name="证据材料（连续页码）" type="PDF" muted={!record.evidence?.length} /></div>
+         <div className="output-preview"><OutputRow name={record.case_stage === "litigation" ? "民事起诉状（要素式、普通式）" : "劳动人事争议仲裁申请书"} type="DOCX" /><OutputRow name="证据目录（横向四列）" type="DOCX" /><OutputRow name="证据材料（连续页码）" type="PDF" muted={!record.evidence?.length} /></div>
         {generation && <ProgressBlock label={generation.stage} progress={generation.progress} />}
         <button className="button button-primary button-large generate-button" onClick={generate} disabled={busy || materialProcessing || (record.access_status === "locked" && !record.unlimited_generation) || (!record.unlimited_generation && record.generation_count >= 3)}>{busy ? <><LoaderCircle className="spin" /> 正在生成…</> : <><Sparkles size={19} /> 大模型撰写并生成正式材料</>}<span>{record.unlimited_generation ? `${record.generation_count} 次 · 不限量` : `${record.generation_count}/3 次`}</span></button>
         {materialProcessing && <div className="form-hint">材料仍在识别，完成后即可生成。</div>}
@@ -234,7 +234,7 @@ function EvidenceCard({ item, index, onDelete }: { item: EvidenceItem; index: nu
       <small>原文件：{item.original_name}</small>
       {processing
         ? <ProgressBlock label={stageLabels[item.processing_stage] || "正在处理材料"} progress={item.processing_progress || 10} compact />
-        : <dl><div><dt>来源</dt><dd>{item.source || "将在全案生成时判断"}</dd></div><div><dt>证明目的</dt><dd>{item.purpose || (failed ? "本次识别未完成，将在全案生成时重新判断" : "将在全案生成时判断")}</dd></div></dl>}
+         : <dl><div><dt>证明目的</dt><dd>{item.purpose || (failed ? "本次识别未完成，将在全案生成时重新判断" : "将在全案生成时判断")}</dd></div></dl>}
     </div>
     <div className="evidence-actions"><button className="icon-button danger" onClick={onDelete} aria-label={`删除${item.name || item.original_name}`}><Trash2 size={17} /></button></div>
   </article>;

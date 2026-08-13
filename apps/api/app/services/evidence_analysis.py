@@ -20,19 +20,16 @@ async def analyze_evidence_text(*, case: dict[str, Any], item: dict[str, Any], t
     parsed = await complete_json(
         system="""你是中国劳动争议案件的证据审查助手。请阅读材料正文后只输出JSON。
 name：用材料的法律性质和核心内容命名，不得照抄文件名，例如“劳动人事争议仲裁裁决书”“解除劳动合同协议”。
-source：填写材料的形成主体或取得来源，例如“劳动人事争议仲裁委员会作出”“用人单位与劳动者签署”；无法从正文确认时写“待核实”。
 purpose：结合本案争议，用一到两句说明该材料具体证明的事实；不得使用“证明案件事实”等空泛表述。
 summary：客观概括材料的关键内容。key_facts：字符串数组。confidence：0到1。
-不得虚构正文不存在的人名、日期、金额、签章或结论。输出字段必须为 name、source、purpose、summary、key_facts、confidence。""",
+不得虚构正文不存在的人名、日期、金额、签章或结论。输出字段必须为 name、purpose、summary、key_facts、confidence。""",
         user=json.dumps(prompt, ensure_ascii=False),
         timeout=120,
     )
     name = str(parsed.get("name") or "证据材料").strip()[:255]
-    source = str(parsed.get("source") or "待核实").strip()[:255]
     purpose = str(parsed.get("purpose") or "待结合案件事实核实证明目的").strip()[:2000]
     return {
         "name": name,
-        "source": source,
         "purpose": purpose,
         "analysis": {
             "summary": str(parsed.get("summary") or "").strip(),
