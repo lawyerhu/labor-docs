@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 from typing import Any
 
 import httpx
@@ -25,6 +26,31 @@ class LegalSnapshot:
             "source": self.source,
             "content": self.content,
         }
+
+
+def grounded_legal_basis(candidates: list[Any], law_snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Keep only citations that can be found in a verified YuanDian law snapshot."""
+    law = law_snapshot if isinstance(law_snapshot, dict) else {}
+    if law.get("verified") is not True:
+        return []
+    source_text = json.dumps(law.get("content") or {}, ensure_ascii=False)
+    grounded: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in candidates:
+        value = item if isinstance(item, dict) else {"citation": item}
+        citation = str(value.get("citation") or "").strip()
+        if not citation or citation in seen or citation not in source_text:
+            continue
+        seen.add(citation)
+        grounded.append(
+            {
+                "citation": citation,
+                "verified": True,
+                "source": law.get("source"),
+                "retrieved_at": law.get("retrieved_at"),
+            }
+        )
+    return grounded
 
 
 class YuandianLegalResearchProvider:

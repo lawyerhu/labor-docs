@@ -79,6 +79,10 @@ class InternalCaseAnalysisInput(BaseModel):
     round: Literal[1, 2] = 1
 
 
+class InternalLegalSearchInput(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+
+
 class ExtractionPatch(BaseModel):
     """Only these case-data keys may be returned by a configured language model."""
 

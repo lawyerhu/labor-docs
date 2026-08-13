@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
+from app.services.legal_research import grounded_legal_basis
 from app.services.openai_compat import complete_json
 
 
@@ -15,7 +17,43 @@ _CASE_DATA_KEYS = (
     "intake",
     "analysis",
     "claims",
+    "legal_basis",
+    "legal_research",
 )
+
+_PRECISE_LAW_CITATION = re.compile(
+    r"《[^》]{2,80}》\s*第[〇零一二三四五六七八九十百千万两0-9]+条(?:之[〇零一二三四五六七八九十百千万两0-9]+)?"
+    r"|第[〇零一二三四五六七八九十百千万两0-9]+条(?:之[〇零一二三四五六七八九十百千万两0-9]+)?"
+)
+
+
+def _compact_research(value: Any, limit: int) -> Any:
+    if not isinstance(value, dict):
+        return value
+    result = {key: item for key, item in value.items() if key != "content"}
+    content = json.dumps(value.get("content") or {}, ensure_ascii=False)
+    result["content"] = content[:limit]
+    return result
+
+
+def _sanitize_law_citations(text: str, verified: list[dict[str, Any]]) -> str:
+    allowed = {str(item.get("citation") or "").strip() for item in verified}
+    allowed_spans = []
+    for citation in allowed:
+        start = text.find(citation)
+        while citation and start >= 0:
+            allowed_spans.append((start, start + len(citation)))
+            start = text.find(citation, start + 1)
+
+    def replace(match: re.Match[str]) -> str:
+        citation = match.group(0).strip()
+        inside_verified_citation = any(
+            start <= match.start() and match.end() <= end
+            for start, end in allowed_spans
+        )
+        return citation if citation in allowed or inside_verified_citation else "[待核验法律依据]"
+
+    return _PRECISE_LAW_CITATION.sub(replace, text)
 
 
 def compact_case_for_draft(case: dict[str, Any]) -> dict[str, Any]:
@@ -25,6 +63,13 @@ def compact_case_for_draft(case: dict[str, Any]) -> dict[str, Any]:
         for key in _CASE_DATA_KEYS
         if data.get(key) not in (None, "", [], {})
     }
+    research = compact_data.get("legal_research")
+    if isinstance(research, dict):
+        compact_data["legal_research"] = {
+            "law": _compact_research(research.get("law"), 24_000),
+            "cases": _compact_research(research.get("cases"), 12_000),
+            "company": _compact_research(research.get("company"), 6_000),
+        }
     return {
         "id": case.get("id"),
         "title": case.get("title"),
@@ -61,14 +106,32 @@ data_patch：从案件说明及材料中能够可靠提取的结构化信息。�
 - arbitration：committee、award_number、result、service_date、payment_status。
 当材料与用户已确认信息冲突时，不覆盖原值，并在 missing_fields 中写明[待核实：具体冲突]。
 evidence_items：逐项返回 id、name、purpose。name按材料内容命名，不得使用上传文件名；purpose必须结合诉请写出该证据证明的具体事实。不要返回来源字段。
-verified_law：只能使用输入中已标记 verified=true 且能从来源内容核对的法条。无法核验时不写具体条号，可在事实理由末尾使用[待核验法律依据]。
+verified_law：对象数组，每项只包含 citation。只能使用输入 legal_research.law 中已标记 verified=true 且 citation 原文能从其 content 核对的法条。无法核验时返回空数组，不写具体条号，并在事实理由末尾使用[待核验法律依据]。
 missing_fields：仅列影响提交或诉请计算且无法从材料得出的关键信息。不要为可由正文自然表述的信息制造占位符。
 语气专业克制，避免“保证胜诉”等结论。""",
         user=json.dumps({"case": compact_case_for_draft(case), "evidence": evidence}, ensure_ascii=False),
         timeout=180,
     )
     claims = [str(value).strip() for value in parsed.get("claims") or [] if str(value).strip()]
-    facts = [str(value).strip() for value in parsed.get("facts_and_reasons") or [] if str(value).strip()]
+    research = (case.get("data") or {}).get("legal_research") if isinstance(case.get("data"), dict) else {}
+    law_snapshot = research.get("law") if isinstance(research, dict) else None
+    candidates = list(parsed.get("verified_law") or [])
+    patch = parsed.get("data_patch") if isinstance(parsed.get("data_patch"), dict) else {}
+    candidates.extend(patch.get("legal_basis") or [])
+    legal_basis = grounded_legal_basis(candidates, law_snapshot)
+    patch["legal_basis"] = legal_basis
+    facts = [
+        _sanitize_law_citations(str(value).strip(), legal_basis)
+        for value in parsed.get("facts_and_reasons") or []
+        if str(value).strip()
+    ]
+    combined_facts = "\n".join(facts)
+    if legal_basis:
+        missing_citations = [item["citation"] for item in legal_basis if item["citation"] not in combined_facts]
+        if missing_citations:
+            facts.append(f"法律依据：{'；'.join(missing_citations)}。")
+    elif "[待核验法律依据]" not in combined_facts:
+        facts.append("[待核验法律依据]")
     updates = []
     known_ids = {item["id"] for item in evidence_items}
     for item in parsed.get("evidence_items") or []:
@@ -83,7 +146,8 @@ missing_fields：仅列影响提交或诉请计算且无法从材料得出的关
     return {
         "claims": claims,
         "facts_and_reasons": facts,
-        "data_patch": parsed.get("data_patch") if isinstance(parsed.get("data_patch"), dict) else {},
+        "data_patch": patch,
+        "legal_basis": legal_basis,
         "missing_fields": [str(value) for value in parsed.get("missing_fields") or []],
         "evidence_updates": updates,
     }

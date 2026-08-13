@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from app.config import get_settings
-from app.services.legal_research import YuandianLegalResearchProvider
+from app.services.legal_research import YuandianLegalResearchProvider, grounded_legal_basis
 from app.services.openai_compat import complete_json
 
 
@@ -56,16 +56,8 @@ def _ground_legal_basis(parsed: dict[str, Any], research: dict[str, Any]) -> Non
     if not isinstance(patch, dict):
         parsed["data_patch"] = {}
         return
-    law = research.get("law") if isinstance(research.get("law"), dict) else {}
-    source_text = json.dumps(law.get("content") or {}, ensure_ascii=False)
-    grounded = []
-    for item in patch.get("legal_basis") or []:
-        if not isinstance(item, dict):
-            continue
-        citation = str(item.get("citation") or "").strip()
-        if law.get("verified") is True and citation and citation in source_text:
-            grounded.append({**item, "verified": True, "source": law.get("source"), "retrieved_at": law.get("retrieved_at")})
-    patch["legal_basis"] = grounded
+    law = research.get("law") if isinstance(research.get("law"), dict) else None
+    patch["legal_basis"] = grounded_legal_basis(patch.get("legal_basis") or [], law)
 
 
 class CaseAnalyzer:

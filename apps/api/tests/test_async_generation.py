@@ -7,6 +7,7 @@ import app.main as main_module
 from app.config import get_settings
 from app.main import create_app
 from app.schemas import InternalGenerationJobInput
+from app.services.legal_research import LegalSnapshot
 
 
 def test_health_exposes_safe_git_sha(monkeypatch):
@@ -60,6 +61,31 @@ def test_internal_generation_request_is_accepted_before_long_running_work(monkey
         "case_id": "case-1",
     }
     assert len(scheduled) == 1
+
+
+def test_internal_legal_search_uses_yuandian_law_and_case_mcp(monkeypatch):
+    class FakeProvider:
+        async def search_law(self, query):
+            return LegalSnapshot(query, True, "2026-08-14T00:00:00Z", "yuandian:mcp:law", {"items": ["law"]})
+
+        async def search_cases(self, query):
+            return LegalSnapshot(query, True, "2026-08-14T00:00:00Z", "yuandian:mcp:case", {"items": ["case"]})
+
+    monkeypatch.setattr(main_module, "YuandianLegalResearchProvider", FakeProvider)
+    settings = get_settings()
+    settings.generator_internal_token = "test-generator-token"
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/internal/legal-search",
+            headers={"Authorization": "Bearer test-generator-token"},
+            json={"query": "劳动争议起诉期限"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["law"]["source"] == "yuandian:mcp:law"
+    assert response.json()["law"]["verified"] is True
+    assert response.json()["cases"]["source"] == "yuandian:mcp:case"
 
 
 def test_background_generation_reports_completed_result(monkeypatch):

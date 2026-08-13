@@ -236,6 +236,28 @@ async function requestCaseAnalysis(env: Env, payload: Record<string, unknown>): 
   }
 }
 
+async function requestLegalSearch(env: Env, query: string): Promise<Record<string, unknown>> {
+  const generatorUrl = env.GENERATOR_URL?.trim();
+  const token = env.GENERATOR_AUTH_TOKEN?.trim();
+  if (!generatorUrl || !token) throw new Error("法律核验服务尚未配置");
+  const response = await fetch(`${generatorUrl.replace(/\/$/, "")}/internal/legal-search`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ query }),
+  });
+  if (!response.ok) {
+    let detail = `法律核验服务返回 ${response.status}`;
+    try {
+      const body = await response.json() as { detail?: unknown };
+      if (typeof body.detail === "string" && body.detail.length <= 200) detail = body.detail;
+    } catch {}
+    throw new Error(detail);
+  }
+  const result = await response.json();
+  if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("法律核验服务返回无效结果");
+  return result as Record<string, unknown>;
+}
+
 async function requestAuthCode(request: Request, env: Env): Promise<Response> {
   if (testAdminOnly(env)) return json({ detail: "当前仅开放测试管理员登录" }, { status: 503 });
   const secret = env.SESSION_SECRET?.trim();
@@ -903,13 +925,29 @@ async function legalSearch(request: Request, env: Env, caseId: string): Promise<
   try { body = await request.json() as typeof body; } catch { return json({ detail: "请求体必须是 JSON" }, { status: 400 }); }
   const query = typeof body.query === "string" ? body.query.trim().slice(0, 500) : "";
   if (!query) return json({ detail: "请输入检索词" }, { status: 422 });
+  let research: Record<string, unknown>;
+  try {
+    research = await requestLegalSearch(env, query);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "法律核验服务暂时不可用";
+    return json({ detail }, { status: 503 });
+  }
+  const law = research.law;
+  const cases = research.cases;
+  if (!law || typeof law !== "object" || Array.isArray(law)) {
+    return json({ detail: "法律核验服务未返回法条结果" }, { status: 502 });
+  }
   const data = parseCaseData(owned.row.data_json);
   const snapshots = Array.isArray(data.legal_snapshots) ? [...data.legal_snapshots] : [];
-  const snapshot = { verified: false, source: "yuandian:not-configured", query, retrieved_at: new Date().toISOString(), content: {} };
+  const snapshot = law as Record<string, unknown>;
   snapshots.push(snapshot);
   data.legal_snapshots = snapshots.slice(-20);
+  data.legal_research = {
+    law: snapshot,
+    cases: cases && typeof cases === "object" && !Array.isArray(cases) ? cases : null,
+  };
   await env.DB.prepare("UPDATE cases SET data_json = ? WHERE id = ? AND user_id = ?").bind(JSON.stringify(data), caseId, owned.user.id).run();
-  return json({ snapshot, readiness: readinessFor(owned.row, data).readiness });
+  return json({ snapshot, research: data.legal_research, readiness: readinessFor(owned.row, data).readiness });
 }
 
 function isAuthorized(request: Request, env: Env): boolean {

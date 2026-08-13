@@ -28,6 +28,7 @@ from app.schemas import (
     InternalEvidenceAnalysisInput,
     InternalGenerationJobInput,
     InternalCaseAnalysisInput,
+    InternalLegalSearchInput,
     InternalOtpInput,
     LegalSearchInput,
     PasswordLoginInput,
@@ -278,6 +279,21 @@ def create_app() -> FastAPI:
             current_data=payload.current_data,
             round_number=payload.round,
         )
+
+    @app.post("/internal/legal-search", include_in_schema=False)
+    async def internal_legal_search(
+        payload: InternalLegalSearchInput,
+        authorization: str | None = Header(default=None),
+    ):
+        expected = settings.generator_internal_token
+        if not expected or not secrets.compare_digest(authorization or "", f"Bearer {expected}"):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未授权")
+        provider = YuandianLegalResearchProvider()
+        law, cases = await asyncio.gather(
+            provider.search_law(payload.query),
+            provider.search_cases(payload.query),
+        )
+        return {"law": law.as_dict(), "cases": cases.as_dict()}
 
     @app.post("/internal/auth/send-otp", include_in_schema=False)
     def internal_send_otp(

@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.services.document_drafting import draft_case_documents
 from app.services.documents import build_case_package
 from app.services.generation import _cleanup_generated_case
+from app.services.legal_research import YuandianLegalResearchProvider
 from app.services.material_extraction import extract_material_with_vision
 from app.services.storage import delete_if_managed, materialize_for_processing, persist_artifact
 
@@ -156,6 +157,54 @@ def _merge_known_values(current: dict[str, Any], patch: dict[str, Any]) -> dict[
     return merged
 
 
+def _generation_research_terms(case: dict[str, Any]) -> tuple[str, str | None]:
+    data = case.get("data") if isinstance(case.get("data"), dict) else {}
+    claims = data.get("claims") if isinstance(data.get("claims"), list) else []
+    claim_terms = []
+    for claim in claims[:8]:
+        if not isinstance(claim, dict):
+            continue
+        value = claim.get("title") or claim.get("kind")
+        if value:
+            claim_terms.append(str(value)[:120])
+    stage = "仲裁后起诉" if case.get("case_stage") == "litigation" else "劳动仲裁"
+    side = "用人单位" if case.get("party_side") == "employer" else "劳动者"
+    query = f"劳动争议 {stage} {side} {'；'.join(claim_terms) or '请求权基础、举证责任及处理规则'}"
+
+    parties = data.get("parties") if isinstance(data.get("parties"), dict) else {}
+    company_name = None
+    for role in ("initiating", "opposing"):
+        party = parties.get(role) if isinstance(parties.get(role), dict) else {}
+        name = str(party.get("name") or "").strip()
+        if name and (party.get("type") == "company" or party.get("credit_code") or name.endswith(("公司", "事务所", "中心"))):
+            company_name = name[:100]
+            break
+    return query[:500], company_name
+
+
+async def research_for_generation(
+    case: dict[str, Any],
+    material_texts: dict[str, str],
+    *,
+    provider: Any | None = None,
+) -> dict[str, Any]:
+    del material_texts  # 法律检索不发送证据正文或个人信息。
+    search = provider or YuandianLegalResearchProvider()
+    query, company_name = _generation_research_terms(case)
+    tasks = [
+        search.search_law(query),
+        search.search_cases(f"{query} 类案裁判规则 举证责任"),
+    ]
+    if company_name:
+        tasks.append(search.search_company(company_name))
+    results = await asyncio.gather(*tasks)
+    return {
+        "law": results[0].as_dict(),
+        "cases": results[1].as_dict(),
+        "company": results[2].as_dict() if company_name else None,
+    }
+
+
 async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> dict[str, Any]:
     settings = get_settings()
     case = worker_payload.get("case")
@@ -268,6 +317,13 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
             )
             await _report_progress(job_id, f"第 {item_index + 1}/{total_items} 份材料读取完成", item_end)
         await _report_progress(job_id, "材料文字识别完成", 38)
+        stage = "research law and cases"
+        await _report_progress(job_id, "正在通过元典核验现行法条与相关案例", 42)
+        legal_research = await research_for_generation(case, material_texts)
+        case = {
+            **case,
+            "data": {**dict(case.get("data") or {}), "legal_research": legal_research},
+        }
         stage = "draft documents"
         await _report_progress(job_id, "大模型正在分析全案并撰写文书", 50)
         draft = await draft_case_documents(case=case, evidence_items=evidence_items, material_texts=material_texts)
@@ -276,6 +332,8 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
             if item["id"] in update_map:
                 item.update(update_map[item["id"]])
         data = _merge_known_values(dict(case.get("data") or {}), draft["data_patch"])
+        data["legal_research"] = legal_research
+        data["legal_basis"] = draft["legal_basis"]
         data["_ai_draft"] = {
             "claims": draft["claims"],
             "facts_and_reasons": draft["facts_and_reasons"],
