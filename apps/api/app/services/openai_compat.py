@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -63,7 +64,10 @@ def parse_json_text(text: str) -> dict[str, Any]:
     return value
 
 
-async def complete_json(*, system: str, user: str, timeout: float = 60) -> dict[str, Any]:
+RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+async def complete_json(*, system: str, user: str, timeout: float = 60, attempts: int = 3) -> dict[str, Any]:
     settings = get_settings()
     if not settings.openai_base_url or not settings.openai_api_key or not settings.openai_model:
         raise RuntimeError("大模型未配置")
@@ -90,17 +94,28 @@ async def complete_json(*, system: str, user: str, timeout: float = 60) -> dict[
     else:
         raise RuntimeError("OPENAI_WIRE_API 只能是 chat 或 responses")
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                url,
-                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-                json=body,
-            )
-    except httpx.TimeoutException as exc:
-        raise RuntimeError(f"模型接口超时（{int(timeout)}秒）") from exc
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"模型接口不可达：{type(exc).__name__}") from exc
-    if response.status_code >= 400:
-        raise RuntimeError(f"模型接口返回 {response.status_code}")
-    return parse_json_text(response_text(response.json()))
+    last_error = "模型接口失败"
+    for attempt in range(1, max(attempts, 1) + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                    json=body,
+                )
+        except httpx.TimeoutException as exc:
+            last_error = f"模型接口超时（{int(timeout)}秒）"
+            if attempt >= attempts:
+                raise RuntimeError(last_error) from exc
+        except httpx.HTTPError as exc:
+            last_error = f"模型接口不可达：{type(exc).__name__}"
+            if attempt >= attempts:
+                raise RuntimeError(last_error) from exc
+        else:
+            if response.status_code < 400:
+                return parse_json_text(response_text(response.json()))
+            last_error = f"模型接口返回 {response.status_code}"
+            if response.status_code not in RETRYABLE_STATUS or attempt >= attempts:
+                raise RuntimeError(last_error)
+        await asyncio.sleep(min(8, 2 * attempt))
+    raise RuntimeError(last_error)

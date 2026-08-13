@@ -82,6 +82,50 @@ def test_complete_json_includes_model_status_code(monkeypatch):
         raise AssertionError("expected RuntimeError")
 
 
+def test_complete_json_retries_service_unavailable(monkeypatch):
+    class FakeSettings:
+        openai_base_url = "https://example.test/v1"
+        openai_api_key = "test-key"
+        openai_model = "test-model"
+        openai_wire_api = "responses"
+
+    class Unavailable:
+        status_code = 503
+
+    class Success:
+        status_code = 200
+
+        def json(self):
+            return {"output_text": '{"ok": true}'}
+
+    calls = {"n": 0}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *args, **kwargs):
+            calls["n"] += 1
+            return Unavailable() if calls["n"] == 1 else Success()
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(openai_compat, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(openai_compat.asyncio, "sleep", no_sleep)
+
+    parsed = asyncio.run(openai_compat.complete_json(system="sys", user="user"))
+    assert parsed == {"ok": True}
+    assert calls["n"] == 2
+
+
 def test_complete_json_maps_timeout(monkeypatch):
     class FakeSettings:
         openai_base_url = "https://example.test/v1"
