@@ -554,6 +554,9 @@ function readinessFor(row: CaseRow, data: Record<string, unknown>) {
   const unverifiedLaw = Array.isArray(data.unverified_law)
     ? data.unverified_law.filter((item): item is string => typeof item === "string")
     : [];
+  const evidenceGaps = Array.isArray(data.evidence_gaps)
+    ? data.evidence_gaps.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
   return {
     readiness: missing.length || conflicts.length || unverifiedLaw.length
       ? "formal_with_placeholders"
@@ -561,7 +564,7 @@ function readinessFor(row: CaseRow, data: Record<string, unknown>) {
     missing_fields: missing,
     unresolved_conflicts: conflicts,
     unverified_law: unverifiedLaw,
-    evidence_gaps: [],
+    evidence_gaps: [...new Set(evidenceGaps)].slice(0, 20),
   };
 }
 
@@ -619,6 +622,7 @@ async function casePayload(env: Env, row: CaseRow, user?: PublicUser) {
     created_at: row.created_at,
     expires_at: row.expires_at,
     ...readiness,
+    evidence_requirements: Array.isArray(data.evidence_requirements) ? data.evidence_requirements : [],
     evidence: evidence.results.map(evidencePayload),
     artifacts: artifacts.results,
   };
@@ -818,6 +822,34 @@ async function deleteEvidence(request: Request, env: Env, caseId: string, eviden
   if (!row) return json({ detail: "证据不存在" }, { status: 404 });
   await env.FILES.delete(row.object_key);
   await env.DB.prepare("DELETE FROM evidence WHERE id = ? AND case_id = ?").bind(evidenceId, caseId).run();
+  return new Response(null, { status: 204 });
+}
+
+async function deleteCase(request: Request, env: Env, caseId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  const running = await env.DB.prepare(
+    "SELECT id FROM generation_jobs WHERE case_id = ? AND status IN ('queued', 'dispatched', 'running', 'finalizing') LIMIT 1",
+  ).bind(caseId).first<{ id: string }>();
+  if (running) return json({ detail: "案件正在生成，请等待任务结束后再删除" }, { status: 409 });
+
+  const objects = await env.DB.prepare(
+    "SELECT object_key FROM evidence WHERE case_id = ? UNION ALL SELECT object_key FROM artifacts WHERE case_id = ?",
+  ).bind(caseId, caseId).all<{ object_key: string }>();
+  try {
+    await Promise.all([...new Set(objects.results.map((item) => item.object_key).filter(Boolean))].map((key) => env.FILES.delete(key)));
+  } catch {
+    return json({ detail: "案件文件清理失败，请稍后重试" }, { status: 503 });
+  }
+
+  await env.DB.batch([
+    env.DB.prepare("UPDATE redemption_codes SET redeemed_case_id = NULL WHERE redeemed_case_id = ?").bind(caseId),
+    env.DB.prepare("DELETE FROM generation_jobs WHERE case_id = ?").bind(caseId),
+    env.DB.prepare("DELETE FROM notifications WHERE case_id = ?").bind(caseId),
+    env.DB.prepare("DELETE FROM evidence WHERE case_id = ?").bind(caseId),
+    env.DB.prepare("DELETE FROM artifacts WHERE case_id = ?").bind(caseId),
+    env.DB.prepare("DELETE FROM cases WHERE id = ? AND user_id = ?").bind(caseId, owned.user.id),
+  ]);
   return new Response(null, { status: 204 });
 }
 
@@ -1140,6 +1172,26 @@ async function updateGenerationProgress(request: Request, env: Env, jobId: strin
   return json({ status: "ok" });
 }
 
+function generationDataPatch(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const allowed = new Set([
+    "parties",
+    "employment_facts",
+    "arbitration",
+    "court",
+    "claims",
+    "legal_basis",
+    "evidence_gaps",
+    "evidence_requirements",
+    "jurisdiction",
+    "_ai_draft",
+  ]);
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key, item]) => allowed.has(key) && item !== null && item !== undefined),
+  );
+}
+
 async function dispatchEvidenceAnalysis(message: Message<EvidenceAnalysisMessage>, env: Env): Promise<void> {
   const { evidence_id: evidenceId, case_id: caseId } = message.body;
   await env.DB.prepare("UPDATE evidence SET status = 'processing', processing_stage = 'extracting', processing_progress = 25 WHERE id = ? AND case_id = ?")
@@ -1239,14 +1291,23 @@ async function finalizeGenerationResult(
   const evidenceUpdates = Array.isArray((result as { evidence_updates?: unknown }).evidence_updates)
     ? (result as { evidence_updates: unknown[] }).evidence_updates.flatMap((item) => {
       if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-      const candidate = item as { id?: unknown; name?: unknown; purpose?: unknown; analysis?: unknown };
+       const candidate = item as {
+         id?: unknown;
+         name?: unknown;
+         purpose?: unknown;
+         included?: unknown;
+         order?: unknown;
+         analysis?: unknown;
+       };
       const id = typeof candidate.id === "string" ? candidate.id : "";
       const name = typeof candidate.name === "string" ? candidate.name.trim().slice(0, 255) : "";
       const purpose = typeof candidate.purpose === "string" ? candidate.purpose.trim().slice(0, 2000) : "";
-      const analysis = candidate.analysis && typeof candidate.analysis === "object" && !Array.isArray(candidate.analysis)
-        ? candidate.analysis as Record<string, unknown>
-        : null;
-      return id && name && purpose ? [{ id, name, purpose, analysis }] : [];
+       const analysis = candidate.analysis && typeof candidate.analysis === "object" && !Array.isArray(candidate.analysis)
+         ? candidate.analysis as Record<string, unknown>
+         : null;
+       return id && name && purpose
+         ? [{ id, name, purpose, included: candidate.included !== false, order: Number.isFinite(Number(candidate.order)) ? Number(candidate.order) : null, analysis }]
+         : [];
     })
     : [];
   const artifacts = rawArtifacts.flatMap((item) => {
@@ -1269,19 +1330,31 @@ async function finalizeGenerationResult(
   }
   if (current.status === "completed") return;
 
+  const caseRow = await env.DB.prepare("SELECT data_json FROM cases WHERE id = ?")
+    .bind(caseId)
+    .first<{ data_json: string }>();
+  const patch = generationDataPatch((result as { data_patch?: unknown }).data_patch);
+  const mergedCaseData = caseRow && Object.keys(patch).length
+    ? mergeData(parseCaseData(caseRow.data_json), patch)
+    : null;
+
   const claimed = await env.DB.prepare(
     "UPDATE generation_jobs SET status = 'finalizing', stage = 'finalizing', progress = 99, updated_at = ? WHERE id = ? AND case_id = ? AND status NOT IN ('completed', 'finalizing')",
   ).bind(new Date().toISOString(), jobId, caseId).run();
   if (!claimed.meta.changes) return;
 
   const completedAt = new Date().toISOString();
+  const caseUpdate = mergedCaseData
+    ? env.DB.prepare("UPDATE cases SET data_json = ?, status = 'generated', generation_count = generation_count + 1 WHERE id = ?")
+      .bind(JSON.stringify(mergedCaseData), caseId)
+    : env.DB.prepare("UPDATE cases SET status = 'generated', generation_count = generation_count + 1 WHERE id = ?")
+      .bind(caseId);
   await env.DB.batch([
     env.DB.prepare(
       "UPDATE generation_jobs SET status = 'completed', stage = 'complete', progress = 100, error = NULL, result_json = ?, updated_at = ? WHERE id = ?",
     ).bind(JSON.stringify(result), completedAt, jobId),
     env.DB.prepare("DELETE FROM artifacts WHERE case_id = ?").bind(caseId),
-    env.DB.prepare("UPDATE cases SET status = 'generated', generation_count = generation_count + 1 WHERE id = ?")
-      .bind(caseId),
+    caseUpdate,
     ...evidenceUpdates.map((item) =>
       env.DB.prepare("UPDATE evidence SET name = ?, purpose = ?, analysis_json = CASE WHEN ? IS NULL THEN analysis_json ELSE ? END WHERE id = ? AND case_id = ?")
         .bind(
@@ -1496,6 +1569,7 @@ export default {
         const owned = await ownedCase(request, env, caseId);
         return owned instanceof Response ? owned : json(await casePayload(env, owned.row, owned.user));
       }
+      if (request.method === "DELETE" && !subpath) return deleteCase(request, env, caseId);
       if (request.method === "PATCH" && !subpath) return updateCase(request, env, caseId);
       if (request.method === "POST" && subpath === "chat") return chatCase(request, env, caseId);
       if (request.method === "POST" && subpath === "evidence") return uploadEvidence(request, env, caseId);

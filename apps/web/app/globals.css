@@ -140,7 +140,7 @@ svg { flex: none; }
 .empty-state h2 { margin: 18px 0 6px; }
 .empty-state p { margin: 0 0 24px; color: var(--muted-text); }
 .case-list { margin-top: 34px; background: white; border: 1px solid var(--line); }
-.case-row { min-height: 86px; padding: 15px 20px; display: grid; grid-template-columns: 46px 1fr auto 140px 24px; gap: 16px; align-items: center; border-bottom: 1px solid var(--line); transition: .18s; }
+.case-row { min-height: 86px; padding: 15px 20px; display: grid; grid-template-columns: 46px 1fr auto 140px 44px 24px; gap: 16px; align-items: center; border-bottom: 1px solid var(--line); transition: .18s; }
 .case-row:last-child { border-bottom: 0; }
 .case-row:hover { background: #f9fbff; }
 .case-type-icon { width: 42px; height: 42px; display: grid; place-items: center; color: var(--blue); background: var(--blue-soft); border-radius: 6px; }
@@ -148,6 +148,7 @@ svg { flex: none; }
 .case-main small { margin-top: 4px; color: var(--muted-text); font-size: 12px; }
 .case-date { color: var(--muted-text); font-size: 13px; text-align: right; }
 .case-arrow { color: #97a4b5; }
+.case-delete { width: 38px; height: 38px; }
 .status-badge { padding: 5px 9px; border-radius: 4px; font-size: 12px; font-weight: 750; }
 .status-badge.complete { color: var(--green); background: var(--green-soft); }
 .status-badge.pending { color: var(--amber); background: var(--amber-soft); }
@@ -159,6 +160,7 @@ svg { flex: none; }
 .setup-page { min-height: 100vh; background: white; }
 .setup-header { height: 66px; padding: 0 max(24px, calc((100vw - 1040px)/2)); display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; border-bottom: 1px solid var(--line); }
 .setup-header > span { font-weight: 700; }
+.setup-header > .icon-button { justify-self: end; }
 .setup-form { width: min(760px, calc(100% - 32px)); margin: 54px auto 80px; }
 .setup-progress { position: relative; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .setup-progress span { height: 3px; background: var(--line); }
@@ -349,6 +351,14 @@ svg { flex: none; }
 .follow-up-form li { margin: 8px 0; }
 .follow-up-form .button { margin-top: 14px; }
 .analysis-done { margin-top: 22px; padding: 13px 14px; display: flex; align-items: center; gap: 9px; color: var(--green); background: var(--green-soft); }
+.evidence-plan, .analysis-followups { margin-top: 22px; padding: 16px; color: var(--ink-soft); background: #f7f9fc; border: 1px solid var(--line); }
+.evidence-plan > strong { display: flex; align-items: center; gap: 7px; color: var(--ink); font-size: 13px; }
+.evidence-plan ol, .analysis-followups ol { margin: 10px 0 0; padding-left: 22px; }
+.evidence-plan li, .analysis-followups li { margin: 7px 0; font-size: 13px; }
+.evidence-plan li small { display: block; color: var(--muted-text); font-size: 11px; }
+.analysis-followups > strong { color: var(--ink); font-size: 13px; }
+.analysis-followups textarea { width: 100%; margin-top: 12px; padding: 12px; resize: vertical; border: 1px solid var(--line-dark); border-radius: 6px; }
+.analysis-followups .button { margin-top: 12px; }
 .evidence-card h2, .generation-card h2 { margin: 8px 0 5px; }
 .suggestions { margin-top: 22px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .suggestions strong { margin-right: 4px; font-size: 13px; }
@@ -384,7 +394,7 @@ svg { flex: none; }
   .account-email { display: none; }
   .dashboard { padding-top: 34px; }
   .dashboard-heading { align-items: flex-start; flex-direction: column; }
-  .case-row { grid-template-columns: 42px 1fr 20px; }
+   .case-row { grid-template-columns: 42px 1fr 44px 20px; }
   .case-row .status-badge, .case-date { display: none; }
   .choice-grid { grid-template-columns: 1fr; }
   .setup-form > h1 { font-size: 34px; }

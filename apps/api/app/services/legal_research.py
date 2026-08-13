@@ -28,6 +28,92 @@ class LegalSnapshot:
         }
 
 
+def unavailable_snapshot(category: str, query: str, error: Exception | None = None) -> LegalSnapshot:
+    detail = {"error": type(error).__name__} if error is not None else {}
+    return LegalSnapshot(
+        query,
+        False,
+        datetime.now(timezone.utc).isoformat(),
+        f"yuandian:{category}:unavailable",
+        detail,
+    )
+
+
+async def safe_research(provider: Any, category: str, query: str) -> LegalSnapshot:
+    """Keep one failed YuanDian category from cancelling the other searches."""
+    try:
+        method_name = "search_cases" if category == "case" else f"search_{category}"
+        result = await getattr(provider, method_name)(query)
+    except Exception as exc:
+        return unavailable_snapshot(category, query, exc)
+    if isinstance(result, LegalSnapshot):
+        return result
+    return unavailable_snapshot(category, query)
+
+
+def _find_text(value: Any, keys: set[str]) -> str | None:
+    if isinstance(value, dict):
+        for key, candidate in value.items():
+            if str(key).strip().lower() in keys and isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        for candidate in value.values():
+            found = _find_text(candidate, keys)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for candidate in value:
+            found = _find_text(candidate, keys)
+            if found:
+                return found
+    return None
+
+
+def verified_company_jurisdiction(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Extract only explicitly verified company address/court fields.
+
+    An address is a jurisdiction clue, not permission to invent a court name.
+    A court is copied only when the company MCP returns one explicitly; the
+    drafting model can use the verified address to propose a court separately.
+    """
+    if not isinstance(snapshot, dict) or snapshot.get("verified") is not True:
+        return None
+    content = snapshot.get("content") or {}
+    address = _find_text(
+        content,
+        {
+            "address",
+            "company_address",
+            "domicile",
+            "registered_address",
+            "registeredaddress",
+            "reg_address",
+            "registration_address",
+            "registrationaddress",
+            "companyregisteraddress",
+            "registered_place",
+            "注册地址",
+            "登记地址",
+            "注册住所",
+            "企业住所",
+            "住所",
+            "住所地",
+        },
+    )
+    court = _find_text(content, {"court", "court_name", "jurisdiction_court", "法院名称", "管辖法院", "受诉法院"})
+    if not address and not court:
+        return None
+    result: dict[str, Any] = {
+        "verified": True,
+        "source": snapshot.get("source"),
+        "retrieved_at": snapshot.get("retrieved_at"),
+    }
+    if address:
+        result["registered_address"] = address
+    if court:
+        result["court"] = court
+    return result
+
+
 def grounded_legal_basis(candidates: list[Any], law_snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Keep only citations that can be found in a verified YuanDian law snapshot."""
     law = law_snapshot if isinstance(law_snapshot, dict) else {}

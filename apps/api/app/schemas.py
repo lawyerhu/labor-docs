@@ -21,9 +21,11 @@ class PasswordLoginInput(BaseModel):
 
 
 class CreateCaseInput(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
+    title: str = Field(default="劳动争议案件", min_length=1, max_length=200)
     case_stage: CaseStage
     party_side: PartySide
+    facts: str = Field(default="", max_length=20000)
+    claims_text: str = Field(default="", max_length=10000)
 
 
 class UpdateCaseInput(BaseModel):

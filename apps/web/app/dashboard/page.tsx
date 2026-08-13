@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, BriefcaseBusiness, Building2, FileText, Plus, UserRound } from "lucide-react";
+import { ArrowRight, BriefcaseBusiness, Building2, FileText, Plus, Trash2, UserRound } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -12,6 +12,7 @@ export default function DashboardPage() {
   const [email, setEmail] = useState("");
   const [cases, setCases] = useState<CaseRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [deletingCaseId, setDeletingCaseId] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -20,6 +21,21 @@ export default function DashboardPage() {
       .catch((reason: Error & { status?: number }) => reason.status === 401 ? router.replace("/login") : setError(reason.message))
       .finally(() => setLoading(false));
   }, [router]);
+
+  async function deleteCase(record: CaseRecord) {
+    if (!window.confirm(`确定删除“${record.title}”及其材料、生成文件吗？删除后无法恢复。`)) return;
+    setDeletingCaseId(record.id); setError("");
+    try {
+      await api(`/api/cases/${record.id}`, { method: "DELETE" });
+      setCases((current) => current.filter((item) => item.id !== record.id));
+    } catch (reason) {
+      const typed = reason as Error & { status?: number };
+      if (typed.status === 401) router.replace("/login");
+      else setError(typed.message || "案件删除失败");
+    } finally {
+      setDeletingCaseId(null);
+    }
+  }
 
   return (
     <main className="app-shell" id="main-content">
@@ -35,13 +51,14 @@ export default function DashboardPage() {
         ) : (
           <div className="case-list">
             {cases.map((record) => (
-              <Link href={`/cases/${record.id}`} className="case-row" key={record.id}>
-                <span className="case-type-icon">{record.party_side === "worker" ? <UserRound size={20} /> : <Building2 size={20} />}</span>
-                <span className="case-main"><strong>{record.title}</strong><small>{record.case_stage === "arbitration" ? "劳动仲裁" : "仲裁后起诉"} · {record.party_side === "worker" ? "劳动者一方" : "用人单位一方"}</small></span>
+              <div className="case-row" key={record.id}>
+                <Link href={`/cases/${record.id}`} className="case-type-icon" aria-label={`打开${record.title}`}>{record.party_side === "worker" ? <UserRound size={20} /> : <Building2 size={20} />}</Link>
+                <Link href={`/cases/${record.id}`} className="case-main"><strong>{record.title}</strong><small>{record.case_stage === "arbitration" ? "劳动仲裁" : "仲裁后起诉"} · {record.party_side === "worker" ? "劳动者一方" : "用人单位一方"}</small></Link>
                 <span className={`status-badge ${record.readiness === "formal_complete" ? "complete" : "pending"}`}>{record.readiness === "formal_complete" ? "正式稿·信息完整" : "正式稿·含待填项"}</span>
                 <span className="case-date">{formatDate(record.created_at)}</span>
-                <ArrowRight className="case-arrow" size={18} />
-              </Link>
+                <button className="icon-button danger case-delete" onClick={() => deleteCase(record)} disabled={deletingCaseId === record.id} aria-label={`删除${record.title}`}><Trash2 size={17} /></button>
+                <Link href={`/cases/${record.id}`} className="case-arrow" aria-label={`打开${record.title}`}><ArrowRight size={18} /></Link>
+              </div>
             ))}
           </div>
         )}

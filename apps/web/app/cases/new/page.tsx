@@ -9,6 +9,7 @@ import { api, CaseRecord, CaseStage, PartySide } from "@/lib/api";
 export default function NewCasePage() {
   const router = useRouter();
   const [description, setDescription] = useState("");
+  const [claims, setClaims] = useState("");
   const [stage, setStage] = useState<CaseStage | "">("");
   const [side, setSide] = useState<PartySide | "">("");
   const [loading, setLoading] = useState(false);
@@ -20,8 +21,19 @@ export default function NewCasePage() {
     try {
       const record = await api<CaseRecord>("/api/cases", {
         method: "POST",
-        body: JSON.stringify({ case_stage: stage, party_side: side, facts: description, claims_text: "" }),
+        body: JSON.stringify({ case_stage: stage, party_side: side, facts: description, claims_text: claims }),
       });
+      try {
+        await api(`/api/cases/${record.id}/chat`, {
+          method: "POST",
+          body: JSON.stringify({
+            message: "请分析案情和诉请，指出确有必要补充的信息，并结合类案整理建议提交的证据。已有证据可以提交，没有的证据不影响继续生成。",
+            consent_cloud_processing: true,
+          }),
+        });
+      } catch {
+        // The workspace exposes a retry button if an external analysis service is unavailable.
+      }
       router.push(`/cases/${record.id}`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "案件分析失败，请稍后重试");
@@ -34,15 +46,16 @@ export default function NewCasePage() {
     <form className="intake-card" onSubmit={submit}>
       <div className="eyebrow"><span /> 案件分析</div>
       <h1>先确定案件方向</h1>
-      <p className="setup-lead">只需选择阶段和身份。可以补充一句案情，也可以创建后直接上传材料。</p>
+       <p className="setup-lead">先提交案情和诉请，系统会先做一次全案分析，再集中询问缺失信息并提示类案常见证据。</p>
       <div className="field-grid">
         <label className="field"><span>当前阶段</span><select value={stage} onChange={(event) => setStage(event.target.value as CaseStage)} required><option value="">请选择</option><option value="arbitration">劳动仲裁</option><option value="litigation">仲裁后起诉</option></select></label>
         <label className="field"><span>申请人/原告一方</span><select value={side} onChange={(event) => setSide(event.target.value as PartySide)} required><option value="">请选择</option><option value="worker">劳动者</option><option value="employer">公司/用人单位</option></select></label>
       </div>
-      <label className="field full"><span>补充说明 <small>选填</small></span><textarea rows={5} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="例如：公司不服仲裁裁决中的违约金，希望法院调低或判决无需支付。" /></label>
-      <div className="privacy-note"><FileText size={18} /><span>大模型会综合这段说明和你随后上传的材料，撰写诉请、事实理由及证据目录。</span></div>
+       <label className="field full"><span>案情说明 <small>可不完整</small></span><textarea rows={5} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="例如：公司不服仲裁裁决中的违约金，希望法院调低或判决无需支付。" /></label>
+       <label className="field full"><span>诉请或请求 <small>可不完整</small></span><textarea rows={4} value={claims} onChange={(event) => setClaims(event.target.value)} placeholder="例如：请求调低违约金，或判决无需支付该项费用。" /></label>
+       <div className="privacy-note"><FileText size={18} /><span>系统先分析案情、诉请和类案举证风险，再根据你实际提交的材料选择性编排证据目录。</span></div>
       {error && <div className="form-error">{error}</div>}
-      <button className="button button-primary button-large" disabled={loading || !stage || !side}>{loading ? "正在创建…" : <><Sparkles size={18} /> 创建并上传材料 <ArrowRight size={18} /></>}</button>
+       <button className="button button-primary button-large" disabled={loading || !stage || !side}>{loading ? "正在分析案情…" : <><Sparkles size={18} /> 分析案情并继续 <ArrowRight size={18} /></>}</button>
     </form>
   </main>;
 }

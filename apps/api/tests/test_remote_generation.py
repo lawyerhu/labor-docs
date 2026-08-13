@@ -52,3 +52,46 @@ def test_generation_researches_law_cases_and_company_before_drafting():
     assert result["law"]["verified"] is True
     assert result["cases"]["verified"] is True
     assert result["company"]["verified"] is True
+
+
+def test_generation_company_lookup_survives_law_and_case_failures():
+    calls: list[str] = []
+
+    class Provider:
+        async def search_law(self, _query):
+            calls.append("law")
+            raise RuntimeError("law unavailable")
+
+        async def search_cases(self, _query):
+            calls.append("case")
+            raise RuntimeError("case unavailable")
+
+        async def search_company(self, query):
+            calls.append(f"company:{query}")
+            return LegalSnapshot(
+                query,
+                True,
+                "2026-08-14",
+                "yuandian:mcp:company",
+                {"registered_address": "苏州市吴中区", "court": "苏州市吴中区人民法院"},
+            )
+
+    result = asyncio.run(
+        research_for_generation(
+            {
+                "case_stage": "litigation",
+                "party_side": "worker",
+                "data": {
+                    "intake": {"facts": "甲有限公司不服仲裁裁决"},
+                    "claims": [{"title": "确认无需支付违约金"}],
+                },
+            },
+            {},
+            provider=Provider(),
+        )
+    )
+
+    assert calls == ["law", "case", "company:甲有限公司"]
+    assert result["law"]["verified"] is False
+    assert result["company"]["verified"] is True
+    assert result["jurisdiction"]["court"] == "苏州市吴中区人民法院"

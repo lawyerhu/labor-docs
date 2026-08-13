@@ -70,6 +70,28 @@ def test_evidence_package_uses_actual_files_and_continuous_pages(tmp_path: Path)
     assert result.readiness == "formal_with_placeholders"
 
 
+def test_evidence_catalog_follows_proof_logic_not_upload_order(tmp_path: Path):
+    sources = []
+    for filename, label in (("arbitration.pdf", "仲裁裁决"), ("salary.pdf", "工资记录"), ("contract.pdf", "劳动合同")):
+        path = tmp_path / filename
+        _make_pdf(path, label)
+        sources.append(path)
+
+    build_case_package(
+        case_id="case-ordered-evidence",
+        payload={"case_stage": "litigation", "party_side": "worker", "data": {}},
+        evidence_items=[
+            {"id": "arbitration", "name": "仲裁裁决书", "purpose": "证明仲裁结果", "stored_path": str(sources[0])},
+            {"id": "salary", "name": "工资记录", "purpose": "证明工资标准", "stored_path": str(sources[1])},
+            {"id": "contract", "name": "劳动合同", "purpose": "证明劳动关系", "stored_path": str(sources[2])},
+        ],
+        output_dir=tmp_path,
+    )
+
+    catalog = Document(tmp_path / "case-ordered-evidence" / "02-证据目录.docx")
+    assert [row.cells[1].text for row in catalog.tables[0].rows[1:]] == ["劳动合同", "工资记录", "仲裁裁决书"]
+
+
 def test_litigation_package_uses_ai_draft_in_both_complaints(tmp_path: Path):
     data = {
         "_ai_draft": {

@@ -170,6 +170,8 @@ def _claim_lines(data: dict[str, Any], stage: str) -> list[str]:
         return ["[待填入：仲裁请求]" if stage == "arbitration" else "[待填入：诉讼请求]"]
     lines: list[str] = []
     for claim in claims:
+        if not isinstance(claim, dict):
+            claim = {"title": str(claim)}
         title = claim.get("title") or "[待填入：请求内容]"
         amount = claim.get("amount")
         if amount in (None, ""):
@@ -394,6 +396,41 @@ def _source_pdf(path: Path, temp_dir: Path) -> Path:
     raise RuntimeError(f"不支持的证据格式：{path.suffix}")
 
 
+_EVIDENCE_ORDER_RULES = (
+    (("劳动合同", "入职", "录用", "社保", "劳动关系"), 10),
+    (("工资", "薪资", "银行流水", "考勤", "打卡", "出勤"), 20),
+    (("工作", "绩效", "聊天", "微信", "通知", "沟通", "违纪"), 30),
+    (("解除", "终止", "离职", "辞退", "协议", "违约金"), 40),
+    (("仲裁", "裁决", "调解"), 50),
+    (("送达", "签收", "付款", "履行"), 60),
+)
+
+
+def _evidence_order_key(item: dict[str, Any], original_index: int) -> tuple[int, int, str, int]:
+    explicit = item.get("_package_order")
+    try:
+        if explicit is not None and int(explicit) > 0:
+            return (0, int(explicit), "", original_index)
+    except (TypeError, ValueError):
+        pass
+    text = " ".join(
+        str(item.get(key) or "")
+        for key in ("name", "purpose", "original_name", "material_text")
+    )
+    rank = next((rank for keywords, rank in _EVIDENCE_ORDER_RULES if any(keyword in text for keyword in keywords)), 90)
+    return (1, rank, text[:300], original_index)
+
+
+def _order_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        item
+        for _index, item in sorted(
+            enumerate(evidence),
+            key=lambda pair: _evidence_order_key(pair[1], pair[0]),
+        )
+    ]
+
+
 def _footer_overlay(width: float, height: float, page: int, total: int) -> Any:
     try:
         pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
@@ -473,6 +510,7 @@ def build_case_package(
         raise ValueError("必须先选择案件阶段和申请人/原告一方")
     case_dir = output_dir / case_id
     case_dir.mkdir(parents=True, exist_ok=True)
+    evidence_items = _order_evidence(evidence_items)
     artifacts: list[GeneratedArtifact] = []
     stage = payload["case_stage"]
     if stage == "arbitration":

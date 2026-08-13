@@ -43,7 +43,7 @@ export default function Home() {
 
       <section className="trust-strip" aria-label="核心能力">
         <article><MessageSquareText /><div><strong>对话梳理</strong><span>按案件阶段逐项引导</span></div></article>
-        <article><FileStack /><div><strong>证据成册</strong><span>五列目录、连续页码</span></div></article>
+        <article><FileStack /><div><strong>证据成册</strong><span>四列 DOCX 目录、连续页码</span></div></article>
         <article><ShieldCheck /><div><strong>不编造事实</strong><span>缺项与冲突明确标记</span></div></article>
       </section>
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertCircle, ArrowLeft, Check, Download, FileText, Info, LoaderCircle, Paperclip, Sparkles, Trash2, UploadCloud } from "lucide-react";
+import { AlertCircle, ArrowLeft, Check, Download, FileText, Info, ListChecks, LoaderCircle, Paperclip, Send, Sparkles, Trash2, UploadCloud } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -23,6 +23,8 @@ const generationStageLabels: Record<string, string> = {
   failed: "生成暂未完成",
 };
 
+const CLOUD_PROCESSING_CONSENT = true;
+
 export default function CaseWorkspacePage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -33,7 +35,8 @@ export default function CaseWorkspacePage() {
   const [uploads, setUploads] = useState<Record<string, number>>({});
   const [generation, setGeneration] = useState<{ stage: string; progress: number } | null>(null);
   const [generationJobId, setGenerationJobId] = useState<string | null>(null);
-  const [consentCloudProcessing, setConsentCloudProcessing] = useState(false);
+  const [analysisBusy, setAnalysisBusy] = useState(false);
+  const [supplement, setSupplement] = useState("");
 
   async function reload() {
     try { setRecord(await api<CaseRecord>(`/api/cases/${params.id}`)); }
@@ -113,16 +116,11 @@ export default function CaseWorkspacePage() {
 
   async function uploadFiles(files: FileList | null) {
     if (!files?.length) return;
-    if (!consentCloudProcessing) {
-      setError("请先同意将案情说明和材料文字发送至配置的大模型处理");
-      if (fileRef.current) fileRef.current.value = "";
-      return;
-    }
     setBusy(true); setError("");
     try {
       for (const file of Array.from(files)) {
         setUploads((current) => ({ ...current, [file.name]: 1 }));
-        await uploadEvidence(params.id, file, consentCloudProcessing, (progress) => {
+        await uploadEvidence(params.id, file, CLOUD_PROCESSING_CONSENT, (progress) => {
           setUploads((current) => ({ ...current, [file.name]: progress }));
         });
         setUploads((current) => { const next = { ...current }; delete next[file.name]; return next; });
@@ -147,17 +145,50 @@ export default function CaseWorkspacePage() {
     } finally { setBusy(false); }
   }
 
-  async function generate() {
-    if (!consentCloudProcessing) {
-      setError("请先同意将案情说明和材料文字发送至配置的大模型处理");
+  async function analyzeCase(message = "请重新分析案情和诉请，指出确有必要补充的信息，并结合类案整理建议提交的证据。") {
+    setAnalysisBusy(true); setBusy(true); setError("");
+    try {
+      await api(`/api/cases/${params.id}/chat`, {
+        method: "POST",
+        body: JSON.stringify({ message, consent_cloud_processing: CLOUD_PROCESSING_CONSENT }),
+      });
+      await reload();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "案件分析失败，请稍后重试");
+    } finally {
+      setAnalysisBusy(false); setBusy(false);
+    }
+  }
+
+  async function submitSupplement() {
+    const message = supplement.trim();
+    if (!message) {
+      setError("请填写需要补充的信息");
       return;
     }
+    await analyzeCase(message);
+    setSupplement("");
+  }
+
+  async function deleteCase() {
+    if (!window.confirm("确定删除这个案件及其材料、生成文件吗？删除后无法恢复。")) return;
+    setBusy(true); setError("");
+    try {
+      await api(`/api/cases/${params.id}`, { method: "DELETE" });
+      router.replace("/dashboard");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "案件删除失败");
+      setBusy(false);
+    }
+  }
+
+  async function generate() {
     let trackingStarted = false;
     setBusy(true); setError(""); setGeneration({ stage: "正在创建生成任务", progress: 3 });
     try {
       const result = await api<{ artifacts?: Artifact[]; job_id?: string }>(`/api/cases/${params.id}/generate`, {
         method: "POST",
-        body: JSON.stringify({ consent_cloud_processing: true }),
+        body: JSON.stringify({ consent_cloud_processing: CLOUD_PROCESSING_CONSENT }),
       });
       if (result.job_id) {
         trackingStarted = true;
@@ -187,27 +218,42 @@ export default function CaseWorkspacePage() {
 
   if (!record) return <main className="workspace-loading"><LoaderCircle className="spin" /> 正在打开案件…</main>;
   const summary = String(record.data?.analysis?.summary || record.data?.intake?.facts || "");
+  const analysis = record.data?.analysis as Record<string, any> | undefined;
+  const questions = Array.isArray(analysis?.follow_up_questions) ? analysis.follow_up_questions.map(String).filter(Boolean) : [];
+  const evidenceRequirements = Array.isArray(record.data?.evidence_requirements)
+    ? record.data.evidence_requirements.filter((item: unknown) => item && typeof item === "object")
+    : record.evidence_gaps.map((item) => ({ suggested_evidence: item }));
 
   return <main className="linear-case" id="main-content">
-    <header className="setup-header"><Link href="/dashboard" className="text-link"><ArrowLeft size={17} /> 返回案件</Link><strong>{record.title}</strong><span /></header>
+    <header className="setup-header"><Link href="/dashboard" className="text-link"><ArrowLeft size={17} /> 返回案件</Link><strong>{record.title}</strong><button className="icon-button danger" onClick={deleteCase} disabled={busy} aria-label="删除案件"><Trash2 size={17} /></button></header>
     <section className="linear-content">
       {error && <div className="notice notice-error"><AlertCircle size={17} />{error}<button onClick={() => setError("")}>关闭</button></div>}
 
       <div className="analysis-card">
-        <div className="eyebrow"><span /> 大模型全案撰写</div>
-        <h1>上传现有材料，直接生成</h1>
-        <p>{summary || "不必先填写大量表格。系统会阅读案情说明和全部材料，形成诉请、事实理由、证据名称与证明目的。"}</p>
-        <div className="analysis-done"><Check size={18} /> 缺失内容只在确有必要时标为“待填入”，不会阻止生成。</div>
+        <div className="eyebrow"><span /> 案情与证据分析</div>
+        <h1>{analysis ? "案情分析完成，补充必要信息" : "先分析案情和诉请"}</h1>
+        <p>{summary || "系统会先读取案情和诉请，结合元典类案分析请求权、缺失信息和建议证据。"}</p>
+        {analysis?.legal_analysis && <div className="analysis-done"><Check size={18} /> {String(analysis.legal_analysis)}</div>}
+        {evidenceRequirements.length > 0 && <div className="evidence-plan">
+          <strong><ListChecks size={17} /> 类案和请求权提示的证据</strong>
+          <ol>{evidenceRequirements.map((item: any, index: number) => <li key={`${String(item.suggested_evidence || item.evidence || item.name)}-${index}`}><b>{String(item.suggested_evidence || item.evidence || item.name || "建议材料")}</b><small>有则提交，没有也不影响继续生成</small></li>)}</ol>
+        </div>}
+        {questions.length > 0 && analysis?.round === 1 && <div className="analysis-followups">
+          <strong>请一次性补充以下信息</strong>
+          <ol>{questions.map((question: string, index: number) => <li key={`${question}-${index}`}>{question}</li>)}</ol>
+          <textarea rows={4} value={supplement} onChange={(event) => setSupplement(event.target.value)} placeholder="可以一次性回答上面的多个问题，也可以说明暂时无法提供。" />
+          <button className="button button-secondary" onClick={submitSupplement} disabled={analysisBusy}><Send size={16} /> 合并补充信息</button>
+        </div>}
+        {!analysis && <button className="button button-secondary" onClick={() => analyzeCase()} disabled={analysisBusy}><Sparkles size={17} /> {analysisBusy ? "正在分析…" : "开始分析案情和诉请"}</button>}
       </div>
 
       <div className="evidence-card">
-        <div><div className="eyebrow"><span /> 材料识别</div><h2>上传你实际持有的材料</h2><p>大模型阅读内容后命名证据并填写证明目的；随后按连续页码统一排版。</p></div>
+        <div><div className="eyebrow"><span /> 材料识别</div><h2>上传你实际持有的材料</h2><p>大模型阅读内容后命名材料，生成时会结合全案编排证据目录；随后按连续页码统一排版。</p></div>
         <button className="upload-zone" onClick={() => fileRef.current?.click()} disabled={busy}><UploadCloud size={25} /><strong>选择材料</strong><span>PDF、图片、Word、Excel；单个不超过 50MB</span><input ref={fileRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx" onChange={(event) => uploadFiles(event.target.files)} hidden /></button>
         {Object.entries(uploads).map(([name, progress]) => <ProgressBlock key={name} label={`正在上传：${name}`} progress={progress} />)}
         {!record.evidence?.length
           ? <div className="empty-evidence"><Paperclip size={20} /><span>可以不上传材料；系统仍会依据现有说明生成含待填项的正式稿。</span></div>
           : <div className="evidence-list">{record.evidence.map((item, index) => <EvidenceCard item={item} index={index} key={item.id} onDelete={() => deleteEvidence(item)} />)}</div>}
-        <label className="consent-line"><input type="checkbox" checked={consentCloudProcessing} onChange={(event) => setConsentCloudProcessing(event.target.checked)} /><span>同意将本案说明和材料文字发送至配置的大模型，用于本次识别和文书撰写。</span></label>
       </div>
 
       <div className="generation-card">
@@ -235,7 +281,7 @@ function EvidenceCard({ item, index, onDelete }: { item: EvidenceItem; index: nu
       <small>原文件：{item.original_name}</small>
       {processing
         ? <ProgressBlock label={stageLabels[item.processing_stage] || "正在处理材料"} progress={item.processing_progress || 10} compact />
-         : <dl><div><dt>{failed ? "处理结果" : "证明目的"}</dt><dd>{failed ? analysisError : (item.purpose || "将在全案生成时判断")}</dd></div></dl>}
+         : failed && <div className="form-error">{analysisError}</div>}
     </div>
     <div className="evidence-actions"><button className="icon-button danger" onClick={onDelete} aria-label={`删除${item.name || item.original_name}`}><Trash2 size={17} /></button></div>
   </article>;

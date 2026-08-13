@@ -37,6 +37,48 @@ def test_user_can_create_incomplete_case_and_generate_formal_documents():
         }
 
 
+def test_user_can_delete_owned_case():
+    with TestClient(create_app()) as client:
+        code = client.post("/api/auth/request-code", json={"email": "delete-case@example.com"}).json()["dev_code"]
+        client.post("/api/auth/verify", json={"email": "delete-case@example.com", "code": code})
+        case = client.post(
+            "/api/cases",
+            json={"case_stage": "arbitration", "party_side": "worker"},
+        ).json()
+
+        response = client.delete(f"/api/cases/{case['id']}")
+
+        assert response.status_code == 204
+        assert client.get(f"/api/cases/{case['id']}").status_code == 404
+
+
+def test_case_analysis_receives_claims_and_returns_questions_and_evidence_plan():
+    with TestClient(create_app()) as client:
+        code = client.post("/api/auth/request-code", json={"email": "analysis@example.com"}).json()["dev_code"]
+        client.post("/api/auth/verify", json={"email": "analysis@example.com", "code": code})
+        case = client.post(
+            "/api/cases",
+            json={
+                "case_stage": "litigation",
+                "party_side": "worker",
+                "facts": "公司不服仲裁裁决。",
+                "claims_text": "请求确认无需支付违约金。",
+            },
+        ).json()
+
+        response = client.post(
+            f"/api/cases/{case['id']}/chat",
+            json={"message": "请分析案情和诉请。", "consent_cloud_processing": True},
+        )
+
+        assert response.status_code == 200
+        stored = client.get(f"/api/cases/{case['id']}").json()
+        assert stored["data"]["intake"]["claims_text"] == "请求确认无需支付违约金。"
+        assert stored["data"]["analysis"]["follow_up_questions"]
+        assert stored["evidence_gaps"]
+        assert stored["evidence_requirements"]
+
+
 def test_upload_rejects_executable_renamed_as_pdf():
     with TestClient(create_app()) as client:
         code = client.post("/api/auth/request-code", json={"email": "upload@example.com"}).json()["dev_code"]

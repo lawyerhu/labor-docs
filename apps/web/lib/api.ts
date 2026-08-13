@@ -13,6 +13,13 @@ export interface EvidenceItem {
   analysis?: Record<string, unknown>;
 }
 
+export interface EvidenceRequirement {
+  suggested_evidence: string;
+  claim?: string;
+  fact_to_prove?: string;
+  status?: string;
+}
+
 export interface GenerationJob {
   id: string;
   status: "queued" | "dispatched" | "running" | "finalizing" | "completed" | "failed";
@@ -41,6 +48,7 @@ export interface CaseRecord {
   unresolved_conflicts: string[];
   unverified_law: string[];
   evidence_gaps: string[];
+  evidence_requirements: EvidenceRequirement[];
   generation_count: number;
   unlimited_generation: boolean;
   created_at: string;

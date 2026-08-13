@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,12 @@ from app.config import get_settings
 from app.services.document_drafting import draft_case_documents
 from app.services.documents import build_case_package
 from app.services.generation import _cleanup_generated_case
-from app.services.legal_research import LegalSnapshot, YuandianLegalResearchProvider
+from app.services.legal_research import (
+    LegalSnapshot,
+    YuandianLegalResearchProvider,
+    safe_research,
+    verified_company_jurisdiction,
+)
 from app.services.material_extraction import extract_material_with_vision
 from app.services.storage import delete_if_managed, materialize_for_processing, persist_artifact
 
@@ -145,14 +151,17 @@ async def report_generation_result(
 
 
 def _merge_known_values(current: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    def is_missing(value: Any) -> bool:
+        return value in (None, "", [], {}) or (isinstance(value, str) and value.startswith("[待"))
+
     merged = dict(current)
     for key, value in patch.items():
-        if value in (None, "", [], {}):
+        if is_missing(value):
             continue
         existing = merged.get(key)
         if isinstance(existing, dict) and isinstance(value, dict):
             merged[key] = _merge_known_values(existing, value)
-        elif existing in (None, "", [], {}):
+        elif is_missing(existing):
             merged[key] = value
     return merged
 
@@ -179,6 +188,12 @@ def _generation_research_terms(case: dict[str, Any]) -> tuple[str, str | None]:
         if name and (party.get("type") == "company" or party.get("credit_code") or name.endswith(("公司", "事务所", "中心"))):
             company_name = name[:100]
             break
+    if not company_name:
+        intake = data.get("intake") if isinstance(data.get("intake"), dict) else {}
+        company_text = str(intake.get("facts") or "")
+        match = re.search(r"([\u4e00-\u9fffA-Za-z0-9（）()]{1,40}(?:有限责任公司|股份有限公司|有限公司))", company_text)
+        if match:
+            company_name = match.group(1)
     return query[:500], company_name
 
 
@@ -192,27 +207,29 @@ async def research_for_generation(
     search = provider or YuandianLegalResearchProvider()
     query, company_name = _generation_research_terms(case)
     tasks = [
-        search.search_law(query),
-        search.search_cases(f"{query} 类案裁判规则 举证责任"),
+        safe_research(search, "law", query),
+        safe_research(search, "case", f"{query} 类案裁判规则 举证责任"),
     ]
     if company_name:
-        tasks.append(search.search_company(company_name))
+        tasks.append(safe_research(search, "company", company_name))
     try:
         results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=45)
     except asyncio.TimeoutError:
         # YuanDian is advisory. A slow MCP must not prevent document drafting;
-        # the draft will carry an explicit unverified marker instead.
+        # each category remains explicitly unverified.
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         results = [
             LegalSnapshot(query, False, now, "yuandian:timeout", {"error": "timeout"}),
-            LegalSnapshot(f"{query} 绫绘瑁佸垽瑙勫垯 涓捐瘉璐ｄ换", False, now, "yuandian:timeout", {"error": "timeout"}),
+            LegalSnapshot(f"{query} 类案裁判规则 举证责任", False, now, "yuandian:timeout", {"error": "timeout"}),
         ]
         if company_name:
             results.append(LegalSnapshot(company_name, False, now, "yuandian:timeout", {"error": "timeout"}))
+    company = results[2].as_dict() if company_name else None
     return {
         "law": results[0].as_dict(),
         "cases": results[1].as_dict(),
-        "company": results[2].as_dict() if company_name else None,
+        "company": company,
+        "jurisdiction": verified_company_jurisdiction(company),
     }
 
 
@@ -349,9 +366,15 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
         stage = "research law and cases"
         await _report_progress(job_id, "正在通过元典核验现行法条与相关案例", 42)
         legal_research = await research_for_generation(case, material_texts)
+        jurisdiction = legal_research.get("jurisdiction")
+        case_data = {**dict(case.get("data") or {}), "legal_research": legal_research}
+        if isinstance(jurisdiction, dict):
+            case_data["jurisdiction"] = jurisdiction
+            if jurisdiction.get("court") and not case_data.get("court"):
+                case_data["court"] = jurisdiction["court"]
         case = {
             **case,
-            "data": {**dict(case.get("data") or {}), "legal_research": legal_research},
+            "data": case_data,
         }
         stage = "draft documents"
         await _report_progress(job_id, "大模型正在分析全案并撰写文书", 50)
@@ -359,7 +382,20 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
         update_map = {item["id"]: item for item in draft["evidence_updates"]}
         for item in evidence_items:
             if item["id"] in update_map:
-                item.update(update_map[item["id"]])
+                update = update_map[item["id"]]
+                item["name"] = update["name"]
+                item["purpose"] = update["purpose"]
+                item["_include_in_package"] = update.get("included", True)
+                if update.get("order") is not None:
+                    item["_package_order"] = update["order"]
+            else:
+                item["_include_in_package"] = True
+        selected_evidence = [item for item in evidence_items if item.get("_include_in_package", True)]
+        if evidence_items and not selected_evidence:
+            # A malformed model response must not silently discard every uploaded material.
+            selected_evidence = evidence_items
+            for item in evidence_items:
+                item["_include_in_package"] = True
         data = _merge_known_values(dict(case.get("data") or {}), draft["data_patch"])
         data["legal_research"] = legal_research
         data["legal_basis"] = draft["legal_basis"]
@@ -375,7 +411,7 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
             build_case_package,
             case_id=case_id,
             payload={"case_stage": case_stage, "party_side": party_side, "data": data},
-            evidence_items=evidence_items,
+            evidence_items=selected_evidence,
             output_dir=settings.storage_path / "generated",
         )
         artifacts = []
@@ -409,12 +445,26 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
         if evidence_id in material_texts:
             analysis["extracted_text"] = material_texts[evidence_id]
             analysis["extraction_version"] = 2
-        evidence_updates.append({**update, "analysis": analysis})
+        selected_for_package = original.get("_include_in_package", update.get("included", True)) if original else update.get("included", True)
+        analysis["selected_for_package"] = selected_for_package
+        if update.get("order") is not None:
+            analysis["package_order"] = update["order"]
+        evidence_updates.append({**update, "included": selected_for_package, "analysis": analysis})
 
+    data_patch = dict(draft["data_patch"])
+    data_patch["legal_basis"] = draft["legal_basis"]
+    if isinstance(jurisdiction, dict):
+        data_patch["jurisdiction"] = jurisdiction
+    data_patch["_ai_draft"] = {
+        "claims": draft["claims"],
+        "facts_and_reasons": draft["facts_and_reasons"],
+        "missing_fields": draft["missing_fields"],
+    }
     return {
         "readiness": result.readiness,
         "missing_fields": result.missing_fields,
         "generation_count": int(case.get("generation_count") or 0) + 1,
         "artifacts": artifacts,
         "evidence_updates": evidence_updates,
+        "data_patch": data_patch,
     }

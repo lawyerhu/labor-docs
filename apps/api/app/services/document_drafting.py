@@ -12,6 +12,7 @@ MAX_DRAFT_MATERIAL_CHARS = 20_000
 _CASE_DATA_KEYS = (
     "parties",
     "court",
+    "jurisdiction",
     "employment_facts",
     "arbitration",
     "intake",
@@ -19,6 +20,8 @@ _CASE_DATA_KEYS = (
     "claims",
     "legal_basis",
     "legal_research",
+    "evidence_gaps",
+    "evidence_requirements",
 )
 
 _PRECISE_LAW_CITATION = re.compile(
@@ -69,6 +72,7 @@ def compact_case_for_draft(case: dict[str, Any]) -> dict[str, Any]:
             "law": _compact_research(research.get("law"), 24_000),
             "cases": _compact_research(research.get("cases"), 12_000),
             "company": _compact_research(research.get("company"), 6_000),
+            "jurisdiction": research.get("jurisdiction"),
         }
     return {
         "id": case.get("id"),
@@ -101,11 +105,13 @@ claims：字符串数组，每项是明确、完整的仲裁请求或诉讼请�
 facts_and_reasons：字符串数组，每项是一段连贯中文正文。按时间顺序叙述劳动关系、争议发生、仲裁经过、起诉理由和法律依据，但不得使用“劳动关系”“争议发生”“仲裁前置”“起诉理由”“法律理由”等小标题或类似分段标题。不得原样堆叠用户口语，不得仅罗列字段，不得虚构材料没有的事实。
 data_patch：从案件说明及材料中能够可靠提取的结构化信息。仅返回有依据的字段，未知字段直接省略，不得猜测。可包含：
 - parties.initiating / parties.opposing：type(company/individual)、name、address、credit_code、legal_representative、legal_representative_title、gender、birth_date、id_number、contact；
-- court：管辖法院全称；
+- court：管辖法院全称；只有企业信息或案件材料足以支持时填写；
+- jurisdiction：已核验的用人单位登记地及其来源；
 - employment_facts：start_date、end_date、position、monthly_wage、summary；
 - arbitration：committee、award_number、result、service_date、payment_status。
+- evidence_gaps、evidence_requirements：从请求权和类案中整理的可选证据建议；不要把未提交建议写成已存在的证据。
 当材料与用户已确认信息冲突时，不覆盖原值，并在 missing_fields 中写明[待核实：具体冲突]。
-evidence_items：逐项返回 id、name、purpose。name按材料内容命名，不得使用上传文件名；purpose必须结合诉请写出该证据证明的具体事实。不要返回来源字段。
+evidence_items：逐项返回 id、name、purpose、include、order。name按材料内容命名，不得使用上传文件名；purpose必须结合诉请写出该证据证明的具体事实。include=false 仅用于与本案请求权和事实无关、重复或无法形成证明作用的材料；有用材料必须为 true。order 是证据在目录和证据合并PDF中的逻辑顺序，不得按上传顺序填写，应按“劳动关系/基础事实→工资考勤及履行→争议发生或解除→仲裁经过及送达→其他补强”的证明链，并结合本案请求权和事实时间线确定。不要返回来源字段。
 verified_law：对象数组，每项只包含 citation。只能使用输入 legal_research.law 中已标记 verified=true 且 citation 原文能从其 content 核对的法条。无法核验时返回空数组，不写具体条号，并在事实理由末尾使用[待核验法律依据]。
 missing_fields：仅列影响提交或诉请计算且无法从材料得出的关键信息。不要为可由正文自然表述的信息制造占位符。
 语气专业克制，避免“保证胜诉”等结论。""",
@@ -137,13 +143,27 @@ missing_fields：仅列影响提交或诉请计算且无法从材料得出的关
         facts.append("[待核验法律依据]")
     updates = []
     known_ids = {item["id"] for item in evidence_items}
+    known_items = {item["id"]: item for item in evidence_items}
     for item in parsed.get("evidence_items") or []:
         if not isinstance(item, dict) or item.get("id") not in known_ids:
             continue
-        name = str(item.get("name") or "").strip()
-        purpose = str(item.get("purpose") or "").strip()
-        if name and purpose:
-            updates.append({"id": item["id"], "name": name[:255], "purpose": purpose[:2000]})
+        original = known_items[item["id"]]
+        name = str(item.get("name") or original.get("name") or original.get("original_name") or "材料").strip()
+        purpose = str(item.get("purpose") or original.get("purpose") or "[待核实：证明目的]").strip()
+        order_value = item.get("order")
+        try:
+            order = int(order_value) if order_value is not None else None
+        except (TypeError, ValueError):
+            order = None
+        updates.append(
+            {
+                "id": item["id"],
+                "name": name[:255],
+                "purpose": purpose[:2000],
+                "included": item.get("include") is not False and str(item.get("include") or "").lower() != "false",
+                "order": order,
+            }
+        )
     if not claims or not facts:
         raise RuntimeError("模型未返回完整的文书正文")
     return {

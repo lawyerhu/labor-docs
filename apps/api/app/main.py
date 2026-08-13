@@ -41,7 +41,7 @@ from app.schemas import (
 from app.services.email import send_otp_email
 from app.services.case_analysis import CaseAnalyzer
 from app.services.generation import run_generation
-from app.services.llm import OpenAICompatibleExtractor, deep_merge
+from app.services.llm import deep_merge
 from app.services.legal_research import YuandianLegalResearchProvider
 from app.services.evidence_analysis import analyze_material
 from app.services.remote_generation import (
@@ -110,6 +110,7 @@ def _case_payload(case: CaseRecord) -> dict:
         "unresolved_conflicts": readiness.unresolved_conflicts,
         "unverified_law": readiness.unverified_law,
         "evidence_gaps": readiness.evidence_gaps,
+        "evidence_requirements": (case.data or {}).get("evidence_requirements") or [],
     }
 
 
@@ -378,13 +379,39 @@ def create_app() -> FastAPI:
             party_side=payload.party_side,
             access_status="free" if first_case_free or unlimited_generation else "locked",
             expires_at=datetime.now(timezone.utc) + timedelta(days=30),
-            data={"conversation": []},
+            data={
+                "intake": {
+                    "facts": payload.facts.strip(),
+                    "claims_text": payload.claims_text.strip(),
+                },
+                "conversation": [],
+            },
         )
         user.free_case_used = True
         db.add(case)
         db.commit()
         db.refresh(case)
         return _case_payload(case)
+
+    @app.delete("/api/cases/{case_id}", status_code=204)
+    def delete_case(case_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        case = _owned_case(db, case_id, user)
+        running = db.scalar(
+            select(GenerationJob).where(
+                GenerationJob.case_id == case.id,
+                GenerationJob.status.in_(["queued", "dispatched", "running", "finalizing"]),
+            )
+        )
+        if running:
+            raise HTTPException(status.HTTP_409_CONFLICT, "案件正在生成，请等待任务结束后再删除")
+        for item in case.evidence:
+            delete_if_managed(item.stored_path)
+        for artifact in case.artifacts:
+            delete_if_managed(artifact.stored_path)
+        for job in db.scalars(select(GenerationJob).where(GenerationJob.case_id == case.id)).all():
+            db.delete(job)
+        db.delete(case)
+        db.commit()
 
     @app.get("/api/cases/{case_id}")
     def get_case(case_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -414,17 +441,34 @@ def create_app() -> FastAPI:
         case = _owned_case(db, case_id, user)
         data = dict(case.data or {})
         conversation = list(data.get("conversation") or [])
-        conversation.append({"role": "user", "content": payload.message})
-        if payload.consent_cloud_processing:
-            extracted = await OpenAICompatibleExtractor().extract(payload.message, data)
-            data = deep_merge(data, extracted)
-        assessment = assess_readiness({"case_stage": case.case_stage, "party_side": case.party_side, "data": data})
-        if assessment.missing_fields:
-            reply = f"已记录。下一项请补充：{assessment.missing_fields[0]}。你也可以跳过，系统仍会以待填项生成正式稿。"
-        else:
-            reply = "信息已经较完整。请在结构化确认页复核，也可以直接生成正式稿。"
+        if not payload.consent_cloud_processing:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "请先同意将案情文本发送至大模型和元典进行本次分析")
+        intake = data.get("intake") if isinstance(data.get("intake"), dict) else {}
+        prior_analysis = data.get("analysis") if isinstance(data.get("analysis"), dict) else {}
+        if prior_analysis.get("round") == 2:
+            raise HTTPException(status.HTTP_409_CONFLICT, "案件分析已经完成，可以直接上传证据并生成材料")
+        round_number = 2 if prior_analysis.get("round") == 1 else 1
+        if round_number == 2:
+            conversation.append({"role": "user", "content": payload.message})
+        analysis = await CaseAnalyzer().analyze(
+            facts=str(intake.get("facts") or payload.message),
+            claims_text=str(intake.get("claims_text") or "[待分析诉求]"),
+            supplement=payload.message if round_number == 2 else "",
+            current_data=data,
+            round_number=round_number,
+        )
+        patch = analysis.get("data_patch") if isinstance(analysis.get("data_patch"), dict) else {}
+        data = deep_merge(data, patch)
+        questions = [str(item) for item in analysis.get("follow_up_questions") or []]
+        reply = (
+            f"分析完成。请一次性补充以下信息：\n{chr(10).join(f'{index + 1}. {item}' for index, item in enumerate(questions))}"
+            if round_number == 1 and questions
+            else "补充信息已合并。现在可以上传现有证据并生成文书。"
+        )
         conversation.append({"role": "assistant", "content": reply})
         data["conversation"] = conversation
+        data["analysis"] = {**analysis, "case_stage": case.case_stage, "party_side": case.party_side, "round": round_number}
+        assessment = assess_readiness({"case_stage": case.case_stage, "party_side": case.party_side, "data": data})
         case.data = data
         case.status = "pending_confirmation"
         db.commit()

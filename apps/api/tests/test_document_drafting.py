@@ -102,3 +102,32 @@ def test_draft_removes_unbracketed_precise_article_when_not_verified(monkeypatch
 
     assert "第五十条" not in result["facts_and_reasons"][0]
     assert "[待核验法律依据]" in result["facts_and_reasons"][0]
+
+
+def test_draft_returns_logical_evidence_order_and_selection(monkeypatch):
+    async def complete_json(**_kwargs):
+        result = _model_result()
+        result["evidence_items"] = [
+            {"id": "salary", "name": "工资记录", "purpose": "证明工资标准。", "include": True, "order": 2},
+            {"id": "irrelevant", "name": "无关材料", "purpose": "与本案无关。", "include": False, "order": 9},
+            {"id": "contract", "name": "劳动合同", "purpose": "证明劳动关系。", "include": True, "order": 1},
+        ]
+        return result
+
+    monkeypatch.setattr(drafting, "complete_json", complete_json)
+    result = asyncio.run(
+        drafting.draft_case_documents(
+            case={"id": "case-1", "case_stage": "arbitration", "party_side": "worker", "data": {}},
+            evidence_items=[
+                {"id": "salary", "name": "材料A", "purpose": "", "original_name": "a.pdf"},
+                {"id": "irrelevant", "name": "材料B", "purpose": "", "original_name": "b.pdf"},
+                {"id": "contract", "name": "材料C", "purpose": "", "original_name": "c.pdf"},
+            ],
+            material_texts={"salary": "工资", "irrelevant": "其他", "contract": "劳动合同"},
+        )
+    )
+
+    updates = {item["id"]: item for item in result["evidence_updates"]}
+    assert updates["contract"]["order"] == 1
+    assert updates["salary"]["order"] == 2
+    assert updates["irrelevant"]["included"] is False

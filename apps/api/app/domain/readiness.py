@@ -60,6 +60,8 @@ def assess_readiness(payload: dict[str, Any]) -> ReadinessAssessment:
     if not claims:
         missing.append("仲裁请求" if stage == "arbitration" else "诉讼请求")
     for index, claim in enumerate(claims, start=1):
+        if not isinstance(claim, dict):
+            claim = {"title": str(claim).strip()}
         if not claim.get("title"):
             missing.append(f"第{index}项请求内容")
         if claim.get("amount") in (None, "") and not claim.get("basis"):
