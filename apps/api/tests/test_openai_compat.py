@@ -82,6 +82,21 @@ def test_complete_json_includes_model_status_code(monkeypatch):
         raise AssertionError("expected RuntimeError")
 
 
+def test_fallback_draft_keeps_placeholder_package_when_model_is_down():
+    from app.services.document_drafting import fallback_draft_case_documents
+
+    draft = fallback_draft_case_documents(
+        case={"data": {}},
+        evidence_items=[{"id": "ev-1", "original_name": "scan.pdf", "name": "scan.pdf"}],
+        reason="模型接口返回 503",
+    )
+
+    assert draft["claims"]
+    assert draft["facts_and_reasons"]
+    assert draft["evidence_updates"][0]["name"] != "scan.pdf"
+    assert any("503" in item for item in draft["missing_fields"])
+
+
 def test_complete_json_retries_service_unavailable(monkeypatch):
     class FakeSettings:
         openai_base_url = "https://example.test/v1"
