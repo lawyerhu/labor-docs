@@ -66,7 +66,7 @@ verified_law：只能使用输入中已标记 verified=true 且能从来源内�
 missing_fields：仅列影响提交或诉请计算且无法从材料得出的关键信息。不要为可由正文自然表述的信息制造占位符。
 语气专业克制，避免“保证胜诉”等结论。""",
         user=json.dumps({"case": compact_case_for_draft(case), "evidence": evidence}, ensure_ascii=False),
-        timeout=120,
+        timeout=180,
     )
     claims = [str(value).strip() for value in parsed.get("claims") or [] if str(value).strip()]
     facts = [str(value).strip() for value in parsed.get("facts_and_reasons") or [] if str(value).strip()]

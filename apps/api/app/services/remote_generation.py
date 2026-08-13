@@ -285,7 +285,8 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
         raise
     except Exception as exc:
         _cleanup_generated_case(settings, case_id)
-        raise RemoteGenerationError(f"{stage} failed: {type(exc).__name__}") from exc
+        detail = str(exc).strip() or type(exc).__name__
+        raise RemoteGenerationError(f"{stage} failed: {detail}") from exc
     finally:
         for processing_path in processing_paths:
             delete_if_managed(str(processing_path))

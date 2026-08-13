@@ -75,7 +75,6 @@ async def complete_json(*, system: str, user: str, timeout: float = 60) -> dict[
             "model": settings.openai_model,
             "instructions": system,
             "input": user,
-            "text": {"format": {"type": "json_object"}},
         }
     elif wire_api in {"chat", "chat_completions", "chat-completions"}:
         url = settings.openai_base_url.rstrip("/") + "/chat/completions"
@@ -91,12 +90,17 @@ async def complete_json(*, system: str, user: str, timeout: float = 60) -> dict[
     else:
         raise RuntimeError("OPENAI_WIRE_API 只能是 chat 或 responses")
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            url,
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-            json=body,
-        )
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                json=body,
+            )
+    except httpx.TimeoutException as exc:
+        raise RuntimeError(f"模型接口超时（{int(timeout)}秒）") from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"模型接口不可达：{type(exc).__name__}") from exc
     if response.status_code >= 400:
         raise RuntimeError(f"模型接口返回 {response.status_code}")
     return parse_json_text(response_text(response.json()))

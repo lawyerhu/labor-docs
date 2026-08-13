@@ -80,3 +80,34 @@ def test_complete_json_includes_model_status_code(monkeypatch):
         assert str(exc) == "模型接口返回 429"
     else:
         raise AssertionError("expected RuntimeError")
+
+
+def test_complete_json_maps_timeout(monkeypatch):
+    class FakeSettings:
+        openai_base_url = "https://example.test/v1"
+        openai_api_key = "test-key"
+        openai_model = "test-model"
+        openai_wire_api = "responses"
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *args, **kwargs):
+            raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(openai_compat, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    try:
+        asyncio.run(openai_compat.complete_json(system="sys", user="user", timeout=12))
+    except RuntimeError as exc:
+        assert str(exc) == "模型接口超时（12秒）"
+    else:
+        raise AssertionError("expected RuntimeError")
