@@ -244,7 +244,7 @@ export default function CaseWorkspacePage() {
           <textarea rows={4} value={supplement} onChange={(event) => setSupplement(event.target.value)} placeholder="可以一次性回答上面的多个问题，也可以说明暂时无法提供。" />
           <button className="button button-secondary" onClick={submitSupplement} disabled={analysisBusy}><Send size={16} /> 合并补充信息</button>
         </div>}
-        {!analysis && <button className="button button-secondary" onClick={() => analyzeCase()} disabled={analysisBusy}><Sparkles size={17} /> {analysisBusy ? "正在分析…" : "开始分析案情和诉请"}</button>}
+        {(!analysis || analysis.analysis_status === "fallback") && <button className="button button-secondary" onClick={() => analyzeCase()} disabled={analysisBusy}><Sparkles size={17} /> {analysisBusy ? "正在分析…" : analysis ? "重新分析案情和诉请" : "开始分析案情和诉请"}</button>}
       </div>
 
       <div className="evidence-card">

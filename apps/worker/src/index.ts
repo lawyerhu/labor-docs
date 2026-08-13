@@ -35,6 +35,7 @@ const GENERATION_STALE_MS = 30 * 60 * 1000;
 const EVIDENCE_ANALYSIS_TIMEOUT_MS = 3 * 60 * 1000;
 const EVIDENCE_ANALYSIS_MAX_ATTEMPTS = 3;
 const EVIDENCE_STALE_MS = 15 * 60 * 1000;
+const CASE_ANALYSIS_TIMEOUT_MS = 20 * 1000;
 
 type PublicUser = { id: string; email: string; unlimited_generation?: boolean };
 
@@ -225,17 +226,22 @@ async function requestCaseAnalysis(env: Env, payload: Record<string, unknown>): 
   const generatorUrl = env.GENERATOR_URL?.trim();
   const token = env.GENERATOR_AUTH_TOKEN?.trim();
   if (!generatorUrl || !token) return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CASE_ANALYSIS_TIMEOUT_MS);
   try {
     const response = await fetch(`${generatorUrl.replace(/\/$/, "")}/internal/case-analysis`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     });
     if (!response.ok) return null;
     const result = await response.json();
     return result && typeof result === "object" && !Array.isArray(result) ? result as Record<string, unknown> : null;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -585,6 +591,41 @@ function evidencePayload(item: EvidenceRow) {
   };
 }
 
+function fallbackCaseAnalysis(row: CaseRow, data: Record<string, unknown>, round: number, supplement: string): Record<string, unknown> {
+  const intake = data.intake && typeof data.intake === "object" ? data.intake as Record<string, unknown> : {};
+  const facts = String(intake.facts || "").trim();
+  const claims = String(intake.claims_text || "").trim();
+  const requirements = [
+    { suggested_evidence: "劳动合同或入职材料", status: "not_submitted" },
+    { suggested_evidence: "工资及考勤记录", status: "not_submitted" },
+    { suggested_evidence: "解除、离职或协商材料", status: "not_submitted" },
+    { suggested_evidence: "仲裁裁决书及送达凭证", status: "not_submitted" },
+  ];
+  return {
+    case_stage: row.case_stage,
+    party_side: row.party_side,
+    summary: facts,
+    claims_summary: claims,
+    legal_analysis: "外部分析服务暂时不可用，已保存基础追问和证据建议；可以稍后点击“重新分析”。",
+    follow_up_questions: round === 1
+      ? [
+        "请补充入职、离职或解除劳动关系的关键日期、岗位及工资构成。",
+        "请说明每项请求的金额、计算期间、计算基数以及仲裁已经支持或驳回的部分。",
+        "仲裁裁决何时送达？劳动合同履行地或用人单位所在地在哪个区县？",
+        "目前有哪些劳动合同、工资记录、考勤、聊天记录、解除通知或仲裁材料可以上传？",
+      ]
+      : [],
+    evidence_suggestions: requirements.map((item) => item.suggested_evidence),
+    data_patch: {
+      employment_facts: { summary: [facts, supplement].filter(Boolean).join("\n") },
+      claims: [{ kind: "other", title: claims || "[待分析诉求]", basis: "[待填入：金额、计算基数、期间或计算方式]" }],
+      evidence_gaps: requirements.map((item) => item.suggested_evidence),
+      evidence_requirements: requirements,
+    },
+    analysis_status: "fallback",
+  };
+}
+
 async function ownedCase(request: Request, env: Env, caseId: string): Promise<{ user: PublicUser; row: CaseRow } | Response> {
   const user = await currentUser(request, env);
   if (!user) return json({ detail: "请先登录" }, { status: 401 });
@@ -727,8 +768,7 @@ async function chatCase(request: Request, env: Env, caseId: string): Promise<Res
     supplement: round === 2 ? message : "",
     current_data: data,
     round,
-  });
-  if (!analysis) return json({ detail: "案件分析服务暂时不可用，请稍后重试" }, { status: 502 });
+  }) ?? fallbackCaseAnalysis(owned.row, data, round, round === 2 ? message : "");
   const patch = analysis.data_patch && typeof analysis.data_patch === "object" && !Array.isArray(analysis.data_patch)
     ? analysis.data_patch as Record<string, unknown> : {};
   const merged = mergeData(data, patch);

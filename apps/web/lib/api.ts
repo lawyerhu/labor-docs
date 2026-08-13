@@ -68,7 +68,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     try {
       const body = await response.json();
       message = body.detail ?? message;
-    } catch {}
+    } catch {
+      message = `请求失败（HTTP ${response.status}）`;
+    }
     const error = new Error(message) as Error & { status?: number };
     error.status = response.status;
     throw error;
