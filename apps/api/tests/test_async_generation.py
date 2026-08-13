@@ -10,6 +10,7 @@ from app.schemas import InternalGenerationJobInput
 
 
 def test_health_exposes_safe_git_sha(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     settings = get_settings()
     monkeypatch.setattr(settings, "render_git_commit", "e2e838f0123456789abcdef")
     monkeypatch.setattr(settings, "deepseek_base_url", None)
@@ -28,6 +29,8 @@ def test_health_exposes_safe_git_sha(monkeypatch):
     assert response.status_code == 200
     assert response.json()["git_sha"] == "e2e838f01234"
     assert response.json()["deepseek_primary_configured"] is False
+    assert response.json()["deepseek_api_key_env_present"] is False
+    assert response.json()["deepseek_api_key_env_nonblank"] is False
     assert response.json()["openai_fallback_configured"] is False
     assert response.json()["grok_fallback_configured"] is True
     assert "secret-not-exposed" not in response.text

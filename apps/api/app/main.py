@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -182,6 +183,7 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health():
         commit = (settings.render_git_commit or "").strip()
+        deepseek_env_value = os.environ.get("DEEPSEEK_API_KEY")
         return {
             "status": "ok",
             "version": "0.1.0",
@@ -194,6 +196,8 @@ def create_app() -> FastAPI:
                     settings.deepseek_model,
                 )
             ),
+            "deepseek_api_key_env_present": deepseek_env_value is not None,
+            "deepseek_api_key_env_nonblank": bool((deepseek_env_value or "").strip()),
             "openai_fallback_configured": all(
                 (
                     settings.openai_base_url,
