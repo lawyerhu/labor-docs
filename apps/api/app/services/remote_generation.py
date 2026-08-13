@@ -82,6 +82,41 @@ async def _report_progress(job_id: str, stage: str, progress: int) -> None:
         return
 
 
+async def report_generation_result(
+    job_id: str,
+    case_id: str,
+    *,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    settings = get_settings()
+    worker_url = (settings.worker_internal_url or "").rstrip("/")
+    if not worker_url:
+        raise RemoteGenerationError("Worker internal URL is not configured")
+    headers = {"Content-Type": "application/json"}
+    if settings.worker_internal_token:
+        headers["X-Internal-Token"] = settings.worker_internal_token
+    payload: dict[str, Any] = {
+        "case_id": case_id,
+        "status": "completed" if result is not None else "failed",
+    }
+    if result is not None:
+        payload["result"] = result
+    else:
+        payload["error"] = (error or "Document generation failed")[:1000]
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            response = await client.post(
+                f"{worker_url}/api/internal/generation-jobs/{quote(job_id, safe='')}/result",
+                headers=headers,
+                json=payload,
+            )
+    except httpx.HTTPError as exc:
+        raise RemoteGenerationError("Unable to report generation result to Worker") from exc
+    if response.status_code != 200:
+        raise RemoteGenerationError(f"Worker generation result endpoint returned {response.status_code}")
+
+
 def _merge_known_values(current: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     merged = dict(current)
     for key, value in patch.items():

@@ -800,7 +800,7 @@ async function generateCase(request: Request, env: Env, caseId: string): Promise
   const material = await env.DB.prepare("SELECT id FROM evidence WHERE case_id = ? AND status = 'processing' LIMIT 1")
     .bind(caseId).first<{ id: string }>();
   if (material) return json({ detail: "材料仍在识别，请等待进度完成后再生成" }, { status: 409 });
-  const running = await env.DB.prepare("SELECT id FROM generation_jobs WHERE case_id = ? AND status IN ('queued', 'running', 'dispatched') LIMIT 1")
+  const running = await env.DB.prepare("SELECT id FROM generation_jobs WHERE case_id = ? AND status IN ('queued', 'running', 'dispatched', 'finalizing') LIMIT 1")
     .bind(caseId).first<{ id: string }>();
   if (running) return json({ detail: "已有生成任务正在处理中" }, { status: 409 });
   const jobId = crypto.randomUUID();
@@ -902,7 +902,7 @@ async function enqueueGeneration(request: Request, env: Env): Promise<Response> 
     return json({ detail: "本案件最多成功生成3次" }, { status: 429 });
   }
   const runningJob = await env.DB.prepare(
-    "SELECT id FROM generation_jobs WHERE case_id = ? AND status IN ('queued', 'running', 'dispatched') LIMIT 1",
+    "SELECT id FROM generation_jobs WHERE case_id = ? AND status IN ('queued', 'running', 'dispatched', 'finalizing') LIMIT 1",
   )
     .bind(caseId)
     .first<{ id: string }>();
@@ -1024,7 +1024,7 @@ async function updateGenerationProgress(request: Request, env: Env, jobId: strin
   try { body = await request.json() as typeof body; } catch { return json({ detail: "请求体必须是 JSON" }, { status: 400 }); }
   const stage = typeof body.stage === "string" ? body.stage.trim().slice(0, 80) : "processing";
   const progress = Math.max(1, Math.min(99, Math.round(Number(body.progress) || 1)));
-  await env.DB.prepare("UPDATE generation_jobs SET status = 'running', stage = ?, progress = ?, updated_at = ? WHERE id = ?")
+  await env.DB.prepare("UPDATE generation_jobs SET status = 'running', stage = ?, progress = ?, updated_at = ? WHERE id = ? AND status NOT IN ('completed', 'finalizing', 'failed')")
     .bind(stage, progress, new Date().toISOString(), jobId).run();
   return json({ status: "ok" });
 }
@@ -1073,6 +1073,107 @@ async function dispatchEvidenceAnalysis(message: Message<EvidenceAnalysisMessage
       .bind(caseId, evidenceId, caseId),
   ]);
   message.ack();
+}
+
+async function finalizeGenerationResult(
+  env: Env,
+  jobId: string,
+  caseId: string,
+  result: unknown,
+): Promise<void> {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("生成服务缺少 result");
+  }
+  const rawArtifacts = (result as { artifacts?: unknown }).artifacts;
+  if (!Array.isArray(rawArtifacts)) {
+    throw new Error("生成服务返回的文书列表无效");
+  }
+  const evidenceUpdates = Array.isArray((result as { evidence_updates?: unknown }).evidence_updates)
+    ? (result as { evidence_updates: unknown[] }).evidence_updates.flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+      const candidate = item as { id?: unknown; name?: unknown; source?: unknown; purpose?: unknown };
+      const id = typeof candidate.id === "string" ? candidate.id : "";
+      const name = typeof candidate.name === "string" ? candidate.name.trim().slice(0, 255) : "";
+      const source = typeof candidate.source === "string" ? candidate.source.trim().slice(0, 255) : "";
+      const purpose = typeof candidate.purpose === "string" ? candidate.purpose.trim().slice(0, 2000) : "";
+      return id && name && source && purpose ? [{ id, name, source, purpose }] : [];
+    })
+    : [];
+  const artifacts = rawArtifacts.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const candidate = item as { kind?: unknown; filename?: unknown; object_key?: unknown };
+    const kind = typeof candidate.kind === "string" ? candidate.kind.trim().slice(0, 50) : "";
+    const filename = typeof candidate.filename === "string" ? candidate.filename.trim().slice(0, 255) : "";
+    const objectKey = typeof candidate.object_key === "string" ? candidate.object_key.trim().slice(0, 1000) : "";
+    return kind && filename && objectKey ? [{ kind, filename, object_key: objectKey }] : [];
+  });
+  if (artifacts.length !== rawArtifacts.length) {
+    throw new Error("生成服务返回的文书元数据无效");
+  }
+
+  const current = await env.DB.prepare("SELECT case_id, status FROM generation_jobs WHERE id = ?")
+    .bind(jobId)
+    .first<{ case_id: string; status: string }>();
+  if (!current || current.case_id !== caseId) {
+    throw new Error("生成任务不存在或案件编号不一致");
+  }
+  if (current.status === "completed") return;
+
+  const claimed = await env.DB.prepare(
+    "UPDATE generation_jobs SET status = 'finalizing', stage = 'finalizing', progress = 99, updated_at = ? WHERE id = ? AND case_id = ? AND status NOT IN ('completed', 'finalizing')",
+  ).bind(new Date().toISOString(), jobId, caseId).run();
+  if (!claimed.meta.changes) return;
+
+  const completedAt = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE generation_jobs SET status = 'completed', stage = 'complete', progress = 100, error = NULL, result_json = ?, updated_at = ? WHERE id = ?",
+    ).bind(JSON.stringify(result), completedAt, jobId),
+    env.DB.prepare("DELETE FROM artifacts WHERE case_id = ?").bind(caseId),
+    env.DB.prepare("UPDATE cases SET status = 'generated', generation_count = generation_count + 1 WHERE id = ?")
+      .bind(caseId),
+    ...evidenceUpdates.map((item) =>
+      env.DB.prepare("UPDATE evidence SET name = ?, source = ?, purpose = ? WHERE id = ? AND case_id = ?")
+        .bind(item.name, item.source, item.purpose, item.id, caseId),
+    ),
+    ...artifacts.map((artifact) =>
+      env.DB.prepare(
+        "INSERT INTO artifacts (id, case_id, filename, kind, object_key, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).bind(crypto.randomUUID(), caseId, artifact.filename, artifact.kind, artifact.object_key, completedAt),
+    ),
+  ]);
+}
+
+async function receiveGenerationResult(request: Request, env: Env, jobId: string): Promise<Response> {
+  if (!isAuthorized(request, env)) return json({ detail: "未授权" }, { status: 401 });
+  let body: { case_id?: unknown; status?: unknown; result?: unknown; error?: unknown };
+  try {
+    body = await request.json() as typeof body;
+  } catch {
+    return json({ detail: "请求体必须是 JSON" }, { status: 400 });
+  }
+  const caseId = typeof body.case_id === "string" ? body.case_id.trim() : "";
+  if (!caseId) return json({ detail: "缺少 case_id" }, { status: 400 });
+
+  if (body.status === "failed") {
+    const error = typeof body.error === "string" ? body.error.slice(0, 1000) : "文书生成失败";
+    await env.DB.prepare(
+      "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ? AND case_id = ? AND status != 'completed'",
+    ).bind(error, new Date().toISOString(), jobId, caseId).run();
+    return json({ status: "ok" });
+  }
+  if (body.status !== "completed") return json({ detail: "无效的生成状态" }, { status: 400 });
+
+  try {
+    await finalizeGenerationResult(env, jobId, caseId, body.result);
+  } catch (error) {
+    const detail = String(error).slice(0, 1000);
+    await env.DB.prepare(
+      "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ? AND case_id = ? AND status != 'completed'",
+    ).bind(detail, new Date().toISOString(), jobId, caseId).run();
+    return json({ detail }, { status: 400 });
+  }
+  return json({ status: "ok" });
 }
 
 async function dispatchGeneration(message: Message<GenerationMessage>, env: Env): Promise<void> {
@@ -1147,74 +1248,13 @@ async function dispatchGeneration(message: Message<GenerationMessage>, env: Env)
   }
 
   if (responseBody.status === "completed") {
-    const result = responseBody.result;
-    if (!result || typeof result !== "object" || Array.isArray(result)) {
+    try {
+      await finalizeGenerationResult(env, jobId, caseId, responseBody.result);
+    } catch (error) {
       await env.DB.prepare(
-        "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ?",
-      )
-        .bind("生成服务缺少 result", new Date().toISOString(), jobId)
-        .run();
-      message.ack();
-      return;
+        "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ? AND status != 'completed'",
+      ).bind(String(error).slice(0, 1000), new Date().toISOString(), jobId).run();
     }
-    const rawArtifacts = (result as { artifacts?: unknown }).artifacts;
-    if (!Array.isArray(rawArtifacts)) {
-      await env.DB.prepare(
-        "UPDATE generation_jobs SET status = 'failed', stage = 'failed', progress = 100, error = ?, updated_at = ? WHERE id = ?",
-      )
-        .bind("生成服务返回的文书列表无效", new Date().toISOString(), jobId)
-        .run();
-      message.ack();
-      return;
-    }
-    const evidenceUpdates = Array.isArray((result as { evidence_updates?: unknown }).evidence_updates)
-      ? (result as { evidence_updates: unknown[] }).evidence_updates.flatMap((item) => {
-        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-        const candidate = item as { id?: unknown; name?: unknown; source?: unknown; purpose?: unknown };
-        const id = typeof candidate.id === "string" ? candidate.id : "";
-        const name = typeof candidate.name === "string" ? candidate.name.trim().slice(0, 255) : "";
-        const source = typeof candidate.source === "string" ? candidate.source.trim().slice(0, 255) : "";
-        const purpose = typeof candidate.purpose === "string" ? candidate.purpose.trim().slice(0, 2000) : "";
-        return id && name && source && purpose ? [{ id, name, source, purpose }] : [];
-      })
-      : [];
-    const artifacts = rawArtifacts.flatMap((item) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-      const candidate = item as { kind?: unknown; filename?: unknown; object_key?: unknown };
-      const kind = typeof candidate.kind === "string" ? candidate.kind.trim().slice(0, 50) : "";
-      const filename = typeof candidate.filename === "string" ? candidate.filename.trim().slice(0, 255) : "";
-      const objectKey = typeof candidate.object_key === "string" ? candidate.object_key.trim().slice(0, 1000) : "";
-      return kind && filename && objectKey ? [{ kind, filename, object_key: objectKey }] : [];
-    });
-    if (artifacts.length !== rawArtifacts.length) {
-      await env.DB.prepare(
-        "UPDATE generation_jobs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
-      )
-        .bind("生成服务返回的文书元数据无效", new Date().toISOString(), jobId)
-        .run();
-      message.ack();
-      return;
-    }
-    const completedAt = new Date().toISOString();
-    const statements = [
-      env.DB.prepare(
-        "UPDATE generation_jobs SET status = 'completed', stage = 'complete', progress = 100, result_json = ?, updated_at = ? WHERE id = ?",
-      ).bind(JSON.stringify(result), completedAt, jobId),
-      env.DB.prepare("DELETE FROM artifacts WHERE case_id = ?").bind(caseId),
-      env.DB.prepare(
-        "UPDATE cases SET status = 'generated', generation_count = generation_count + 1 WHERE id = ?",
-      ).bind(caseId),
-      ...evidenceUpdates.map((item) =>
-        env.DB.prepare("UPDATE evidence SET name = ?, source = ?, purpose = ? WHERE id = ? AND case_id = ?")
-          .bind(item.name, item.source, item.purpose, item.id, caseId),
-      ),
-      ...artifacts.map((artifact) =>
-        env.DB.prepare(
-          "INSERT INTO artifacts (id, case_id, filename, kind, object_key, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        ).bind(crypto.randomUUID(), caseId, artifact.filename, artifact.kind, artifact.object_key, completedAt),
-      ),
-    ];
-    await env.DB.batch(statements);
   } else {
     await env.DB.prepare(
       "UPDATE generation_jobs SET status = 'dispatched', result_json = ?, updated_at = ? WHERE id = ?",
@@ -1344,6 +1384,11 @@ export default {
     const generationProgressMatch = url.pathname.match(/^\/api\/internal\/generation-jobs\/([^/]+)\/progress$/);
     if (request.method === "POST" && generationProgressMatch) {
       return updateGenerationProgress(request, env, decodeURIComponent(generationProgressMatch[1]));
+    }
+
+    const generationResultMatch = url.pathname.match(/^\/api\/internal\/generation-jobs\/([^/]+)\/result$/);
+    if (request.method === "POST" && generationResultMatch) {
+      return receiveGenerationResult(request, env, decodeURIComponent(generationResultMatch[1]));
     }
 
     const generationInputMatch = url.pathname.match(/^\/api\/internal\/cases\/([^/]+)\/generation-input$/);

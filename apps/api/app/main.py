@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Response, UploadFile, status
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from sqlalchemy import inspect, select, text
@@ -41,11 +41,37 @@ from app.services.generation import run_generation
 from app.services.llm import OpenAICompatibleExtractor, deep_merge
 from app.services.legal_research import YuandianLegalResearchProvider
 from app.services.evidence_analysis import analyze_material
-from app.services.remote_generation import RemoteGenerationError, _s3_stored_path, fetch_worker_generation_input, run_remote_generation
+from app.services.remote_generation import (
+    RemoteGenerationError,
+    _s3_stored_path,
+    fetch_worker_generation_input,
+    report_generation_result,
+    run_remote_generation,
+)
 from app.services.storage import delete_if_managed, materialize_for_processing, presigned_download, save_upload
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _process_internal_generation_job(payload: InternalGenerationJobInput) -> None:
+    try:
+        worker_payload = await fetch_worker_generation_input(payload.case_id)
+        worker_case = worker_payload.get("case") or {}
+        if worker_case.get("id") != payload.case_id:
+            raise RemoteGenerationError("Worker returned a mismatched case id")
+        result = await run_remote_generation(worker_payload, payload.job_id)
+        await report_generation_result(payload.job_id, payload.case_id, result=result)
+    except Exception as exc:
+        logger.exception("[GENERATION-ERROR] background generation failure")
+        try:
+            await report_generation_result(
+                payload.job_id,
+                payload.case_id,
+                error=f"Document generation failed ({type(exc).__name__})",
+            )
+        except Exception:
+            logger.exception("[GENERATION-CALLBACK-ERROR] failed to report generation failure")
 
 
 def _aware(value: datetime) -> datetime:
@@ -155,11 +181,12 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        return {"status": "ok", "version": "0.1.0"}
+        return {"status": "ok", "version": "0.1.0", "generation_mode": "async"}
 
-    @app.post("/internal/generation-jobs", include_in_schema=False)
+    @app.post("/internal/generation-jobs", include_in_schema=False, status_code=status.HTTP_202_ACCEPTED)
     async def internal_generation_job(
         payload: InternalGenerationJobInput,
+        background_tasks: BackgroundTasks,
         authorization: str | None = Header(default=None),
     ):
         expected = settings.generator_internal_token
@@ -167,19 +194,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "生成服务内部令牌尚未配置")
         if not secrets.compare_digest(authorization or "", f"Bearer {expected}"):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未授权")
-        try:
-            worker_payload = await fetch_worker_generation_input(payload.case_id)
-            worker_case = worker_payload.get("case") or {}
-            if worker_case.get("id") != payload.case_id:
-                raise RemoteGenerationError("Worker返回的案件编号不一致")
-            result = await run_remote_generation(worker_payload, payload.job_id)
-        except RemoteGenerationError as exc:
-            logger.exception("[GENERATION-ERROR] bridge failure")
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"生成服务桥接失败：{exc}") from exc
-        except Exception as exc:
-            logger.exception("[GENERATION-ERROR] document generation failure")
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "文书生成失败") from exc
-        return {"status": "completed", "job_id": payload.job_id, "case_id": payload.case_id, "result": result}
+        background_tasks.add_task(_process_internal_generation_job, payload)
+        return {"status": "accepted", "job_id": payload.job_id, "case_id": payload.case_id}
 
     @app.post("/internal/evidence-analysis", include_in_schema=False)
     async def internal_evidence_analysis(
