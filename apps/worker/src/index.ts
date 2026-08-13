@@ -1257,7 +1257,7 @@ async function dispatchGeneration(message: Message<GenerationMessage>, env: Env)
     }
   } else {
     await env.DB.prepare(
-      "UPDATE generation_jobs SET status = 'dispatched', result_json = ?, updated_at = ? WHERE id = ?",
+      "UPDATE generation_jobs SET status = 'dispatched', result_json = ?, updated_at = ? WHERE id = ? AND status NOT IN ('completed', 'failed', 'finalizing')",
     )
       .bind(JSON.stringify(responseBody), new Date().toISOString(), jobId)
       .run();
