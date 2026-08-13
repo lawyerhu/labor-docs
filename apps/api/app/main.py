@@ -56,6 +56,11 @@ from app.services.storage import delete_if_managed, materialize_for_processing, 
 
 logger = logging.getLogger(__name__)
 
+# A background task must not remain active forever after a model, OCR worker,
+# or external service stops responding.  Ten minutes leaves room for cold
+# starts and multi-page OCR while giving the UI a recoverable terminal state.
+GENERATION_TIMEOUT_SECONDS = 10 * 60
+
 
 async def _process_internal_generation_job(payload: InternalGenerationJobInput) -> None:
     try:
@@ -63,7 +68,10 @@ async def _process_internal_generation_job(payload: InternalGenerationJobInput) 
         worker_case = worker_payload.get("case") or {}
         if worker_case.get("id") != payload.case_id:
             raise RemoteGenerationError("Worker returned a mismatched case id")
-        result = await run_remote_generation(worker_payload, payload.job_id)
+        result = await asyncio.wait_for(
+            run_remote_generation(worker_payload, payload.job_id),
+            timeout=GENERATION_TIMEOUT_SECONDS,
+        )
         await report_generation_result(payload.job_id, payload.case_id, result=result)
     except Exception as exc:
         logger.exception("[GENERATION-ERROR] background generation failure")

@@ -113,3 +113,33 @@ def test_visual_failure_keeps_ocr_text(tmp_path: Path, monkeypatch):
 
     assert "原始OCR文字" in result.text
     assert result.vision_reviewed_pages == ()
+
+
+def test_visual_review_is_capped_to_highest_risk_pages(tmp_path: Path, monkeypatch):
+    path = tmp_path / "many-pages.png"
+    path.write_bytes(b"placeholder")
+    pages = [
+        material_extraction.ExtractedPage(
+            number=index,
+            text=f"OCR-{index}",
+            risk_score=0.5 + index / 20,
+            used_ocr=True,
+            image_bytes=f"image-{index}".encode(),
+            image_mime_type="image/jpeg",
+        )
+        for index in range(1, 6)
+    ]
+    monkeypatch.setattr(material_extraction, "extract_material_pages", lambda *_args, **_kwargs: pages)
+    reviewed: list[int] = []
+
+    async def fake_vision(**kwargs):
+        page_number = int(kwargs["user"].split("第")[1].split("页")[0])
+        reviewed.append(page_number)
+        return {"corrected_text": f"视觉-{page_number}"}
+
+    result = asyncio.run(material_extraction.extract_material_with_vision(path, vision_complete=fake_vision))
+
+    assert len(reviewed) == material_extraction.MAX_VISION_REVIEW_PAGES
+    assert set(reviewed) == {3, 4, 5}
+    assert "OCR-1" in result.text
+    assert "视觉-5" in result.text

@@ -30,6 +30,13 @@ FAST_OCR_RENDER_PIXELS = 800_000
 MAX_OCR_RENDER_PIXELS = 2_000_000
 MIN_USEFUL_OCR_CHARS = 40
 HIGH_RISK_THRESHOLD = 0.55
+# Visual review is an enhancement step; keep it bounded so difficult scans
+# cannot hold the entire evidence job open indefinitely.
+MAX_VISION_REVIEW_PAGES = 3
+VISION_PROVIDER_TIMEOUT_SECONDS = 25
+VISION_PAGE_TIMEOUT_SECONDS = 45
+OCR_PAGE_TIMEOUT_SECONDS = 30
+EXTRACTION_TIMEOUT_SECONDS = 5 * 60
 TESSERACT_CONFIG = "--oem 1 --psm 6 -c tessedit_do_invert=0"
 ExtractionProgress = Callable[[int, int], None]
 VisionProgress = Callable[[int, int], None]
@@ -56,11 +63,19 @@ class MaterialExtractionResult:
 def _ocr_image(image: Image.Image) -> str:
     prepared = image.convert("L")
     try:
-        return pytesseract.image_to_string(
-            prepared,
-            lang="chi_sim",
-            config=TESSERACT_CONFIG,
-        ).strip()
+        try:
+            return pytesseract.image_to_string(
+                prepared,
+                lang="chi_sim",
+                config=TESSERACT_CONFIG,
+                timeout=OCR_PAGE_TIMEOUT_SECONDS,
+            ).strip()
+        except Exception as error:
+            # Tesseract can hang on malformed or unusually large scans. Keep
+            # the page available for the visual fallback instead of blocking
+            # the whole material job.
+            logger.warning("[OCR-SKIPPED] reason=%s", error)
+            return ""
     finally:
         if prepared is not image:
             prepared.close()
@@ -302,24 +317,35 @@ async def extract_material_with_vision(
     vision_progress_callback: VisionProgress | None = None,
     vision_complete: VisionComplete = complete_vision_json,
 ) -> MaterialExtractionResult:
-    pages = await asyncio.to_thread(extract_material_pages, path, progress_callback)
-    candidates = [page for page in pages if page.risk_score >= HIGH_RISK_THRESHOLD and page.image_bytes]
+    try:
+        pages = await asyncio.wait_for(
+            asyncio.to_thread(extract_material_pages, path, progress_callback),
+            timeout=EXTRACTION_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as error:
+        raise RuntimeError("material extraction timed out") from error
+    candidates = sorted(
+        (page for page in pages if page.risk_score >= HIGH_RISK_THRESHOLD and page.image_bytes),
+        key=lambda page: (-page.risk_score, page.number),
+    )[:MAX_VISION_REVIEW_PAGES]
+    candidates = sorted(candidates, key=lambda page: page.number)
     reviewed: list[int] = []
     replacements: dict[int, str] = {}
     for completed, page in enumerate(candidates, start=1):
         if vision_progress_callback:
             vision_progress_callback(completed, len(candidates))
         try:
-            parsed = await vision_complete(
+            parsed = await asyncio.wait_for(vision_complete(
                 system="""你是中国劳动争议材料的页面视觉复核助手。结合页面图像与OCR文字纠错，只输出JSON。
 corrected_text：按页面原有阅读顺序完整转写正文，保留姓名、日期、金额、案号、表格字段和签章文字；不得概括，不得补造看不清的内容。
 uncertain_fragments：仍无法确认的片段数组；notes：可选的简短说明。""",
                 user=f"这是第{page.number}页。OCR初稿如下，请以图像为准复核并与OCR结果合并：\n\n{page.text}",
                 image_bytes=page.image_bytes or b"",
                 mime_type=page.image_mime_type or "image/jpeg",
+                timeout=VISION_PROVIDER_TIMEOUT_SECONDS,
                 attempts=1,
-            )
-        except RuntimeError as error:
+            ), timeout=VISION_PAGE_TIMEOUT_SECONDS)
+        except Exception as error:
             logger.warning("[VISION-REVIEW-SKIPPED] page=%s reason=%s", page.number, error)
             continue
         corrected = str(parsed.get("corrected_text") or "").strip()

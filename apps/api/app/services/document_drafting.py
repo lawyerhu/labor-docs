@@ -110,7 +110,10 @@ verified_law：对象数组，每项只包含 citation。只能使用输入 lega
 missing_fields：仅列影响提交或诉请计算且无法从材料得出的关键信息。不要为可由正文自然表述的信息制造占位符。
 语气专业克制，避免“保证胜诉”等结论。""",
         user=json.dumps({"case": compact_case_for_draft(case), "evidence": evidence}, ensure_ascii=False),
-        timeout=180,
+        # Keep one provider attempt bounded; complete_json will fail over to
+        # the configured fallback providers without multiplying retries.
+        timeout=90,
+        attempts=1,
     )
     claims = [str(value).strip() for value in parsed.get("claims") or [] if str(value).strip()]
     research = (case.get("data") or {}).get("legal_research") if isinstance(case.get("data"), dict) else {}

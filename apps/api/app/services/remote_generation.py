@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.services.document_drafting import draft_case_documents
 from app.services.documents import build_case_package
 from app.services.generation import _cleanup_generated_case
-from app.services.legal_research import YuandianLegalResearchProvider
+from app.services.legal_research import LegalSnapshot, YuandianLegalResearchProvider
 from app.services.material_extraction import extract_material_with_vision
 from app.services.storage import delete_if_managed, materialize_for_processing, persist_artifact
 
@@ -197,7 +197,18 @@ async def research_for_generation(
     ]
     if company_name:
         tasks.append(search.search_company(company_name))
-    results = await asyncio.gather(*tasks)
+    try:
+        results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=45)
+    except asyncio.TimeoutError:
+        # YuanDian is advisory. A slow MCP must not prevent document drafting;
+        # the draft will carry an explicit unverified marker instead.
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        results = [
+            LegalSnapshot(query, False, now, "yuandian:timeout", {"error": "timeout"}),
+            LegalSnapshot(f"{query} 绫绘瑁佸垽瑙勫垯 涓捐瘉璐ｄ换", False, now, "yuandian:timeout", {"error": "timeout"}),
+        ]
+        if company_name:
+            results.append(LegalSnapshot(company_name, False, now, "yuandian:timeout", {"error": "timeout"}))
     return {
         "law": results[0].as_dict(),
         "cases": results[1].as_dict(),
@@ -256,6 +267,15 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
             else:
                 stage = f"extract evidence {evidence_id}"
                 progress_updates = []
+                progress_done = asyncio.Event()
+
+                async def flush_progress() -> None:
+                    flushed = 0
+                    while not progress_done.is_set() or flushed < len(progress_updates):
+                        while flushed < len(progress_updates):
+                            await asyncio.wrap_future(progress_updates[flushed])
+                            flushed += 1
+                        await asyncio.sleep(0.1)
 
                 def report_page(completed: int, total: int) -> None:
                     fraction = completed / max(total, 1)
@@ -286,14 +306,23 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
                     )
 
                 started = time.perf_counter()
-                extraction = await extract_material_with_vision(
-                    processing_path,
-                    progress_callback=report_page,
-                    vision_progress_callback=report_vision,
-                )
+                progress_task = asyncio.create_task(flush_progress())
+                try:
+                    extraction = await extract_material_with_vision(
+                        processing_path,
+                        progress_callback=report_page,
+                        vision_progress_callback=report_vision,
+                    )
+                finally:
+                    progress_done.set()
+                    try:
+                        await asyncio.wait_for(progress_task, timeout=5)
+                    except asyncio.TimeoutError:
+                        # Progress callbacks are best-effort.  Never make a
+                        # completed OCR run wait for a slow Worker callback.
+                        progress_task.cancel()
+                        await asyncio.gather(progress_task, return_exceptions=True)
                 material_texts[evidence_id] = extraction.text
-                for update in progress_updates:
-                    await asyncio.wrap_future(update)
                 logger.info(
                     "[GENERATION-PERF] job=%s evidence=%s extraction_seconds=%.2f chars=%s vision_pages=%s",
                     job_id,
