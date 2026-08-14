@@ -155,6 +155,44 @@ class YuandianLegalResearchProvider:
     async def search_company(self, query: str) -> LegalSnapshot:
         return await self._mcp_search("company", query, ("enterprise", "search"))
 
+    async def probe(self) -> dict[str, dict[str, Any]]:
+        settings = get_settings()
+        token = getattr(settings, "yuandian_token", None) or getattr(settings, "yuandian_api_key", None)
+        if not token:
+            return {category: {"ok": False, "reason": "not-configured"} for category in ("law", "case", "company")}
+        return dict(
+            zip(
+                ("law", "case", "company"),
+                await asyncio.gather(
+                    self._probe_category("law", settings.yuandian_law_mcp_url, token),
+                    self._probe_category("case", settings.yuandian_case_mcp_url, token),
+                    self._probe_category("company", settings.yuandian_company_mcp_url, token),
+                ),
+            )
+        )
+
+    async def _probe_category(self, category: str, url: str, token: str) -> dict[str, Any]:
+        try:
+            from mcp import ClientSession
+            from mcp.client.streamable_http import streamable_http_client
+
+            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream"}
+            async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(20.0, connect=8.0)) as client:
+                async with streamable_http_client(url, http_client=client) as (read, write, _session_id):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        tools = (await session.list_tools()).tools
+                        return {"ok": True, "transport": "streamable_http", "tools_count": len(tools)}
+        except Exception as exc:
+            detail = self._exception_text(exc).lower()
+            reason = "auth-failed" if "401" in detail or "unauthorized" in detail else "unavailable"
+            return {"ok": False, "transport": "streamable_http", "reason": reason, "error": type(exc).__name__}
+
+    @classmethod
+    def _exception_text(cls, exc: BaseException) -> str:
+        nested = getattr(exc, "exceptions", ())
+        return " ".join([type(exc).__name__, str(exc), *(cls._exception_text(item) for item in nested)])
+
     async def _mcp_search(self, category: str, query: str, preferred: tuple[str, ...]) -> LegalSnapshot:
         settings = get_settings()
         now = datetime.now(timezone.utc).isoformat()
