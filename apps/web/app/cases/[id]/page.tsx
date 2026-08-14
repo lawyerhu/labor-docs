@@ -264,7 +264,6 @@ export default function CaseWorkspacePage() {
   if (!record) return <main className="workspace-loading"><LoaderCircle className="spin" /> 正在打开案件…</main>;
   const summary = cleanModelText(record.data?.analysis?.summary || record.data?.intake?.facts || "");
   const analysis = record.data?.analysis as Record<string, any> | undefined;
-  const legalAnalysis = cleanModelText(analysis?.legal_analysis);
   const questions = Array.isArray(analysis?.follow_up_questions)
     ? analysis.follow_up_questions.map(cleanModelText).filter(Boolean)
     : [];
@@ -282,7 +281,6 @@ export default function CaseWorkspacePage() {
         <h1>{analysisPending ? "正在分析案情和诉请" : analysis ? "案情分析完成，补充必要信息" : "先分析案情和诉请"}</h1>
         <p>{summary || "系统会先读取案情和诉请，结合元典类案分析请求权、缺失信息和建议证据。"}</p>
         {analysisPending && <div className="analysis-done"><LoaderCircle size={18} className="spin" /> 正在调用模型和元典分析，请稍候。</div>}
-        {legalAnalysis && <div className="analysis-done"><Check size={18} /> {legalAnalysis}</div>}
         {evidenceRequirements.length > 0 && <div className="evidence-plan">
           <strong><ListChecks size={17} /> 类案和请求权提示的证据</strong>
           <ol>{evidenceRequirements.map((item: any, index: number) => <li key={`${String(item.suggested_evidence || item.evidence || item.name)}-${index}`}><b>{String(item.suggested_evidence || item.evidence || item.name || "建议材料")}</b><small>有则提交，没有也不影响继续生成</small></li>)}</ol>
