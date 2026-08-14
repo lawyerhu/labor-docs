@@ -5,6 +5,19 @@ from app.services.legal_research import LegalSnapshot
 from app.services.remote_generation import _merge_known_values, research_for_generation
 
 
+def test_merge_replaces_pending_verification_placeholders_with_drafted_values():
+    current = {
+        "court": "待核实：企业信息查询未返回结果，无法确定用人单位登记地。",
+        "parties": {"initiating": {"name": "已确认的公司", "address": ""}},
+    }
+    patch = {"court": "江西省萍乡市安源区人民法院"}
+
+    merged = _merge_known_values(current, patch)
+
+    assert merged["court"] == "江西省萍乡市安源区人民法院"
+    assert merged["parties"]["initiating"]["name"] == "已确认的公司"
+
+
 def test_ai_extracted_case_fields_fill_blanks_without_overwriting_confirmed_values():
     current = {
         "parties": {"initiating": {"name": "已确认的公司", "address": ""}},

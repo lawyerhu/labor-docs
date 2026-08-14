@@ -42,6 +42,36 @@ def unavailable_snapshot(category: str, query: str, error: Exception | None = No
     )
 
 
+_CITATION_NOISE = re.compile(r"[\s《》「」『』（）()【】〔〕·、，,。.；;：:\"'“”‘’]+")
+_CLAUSE_RE = re.compile(r"第[一二三四五六七八九十百千零〇\d]+条")
+
+
+def _citation_in_source(citation: str, source_norm: str) -> bool:
+    """校验引用与已核验法条快照匹配：先整体比对，再允许法名/条号分别出现。
+
+    快照正文里“劳动合同法”与“第八十七条”可能分开存放，而模型引用常带
+    书名号或全称，纯子串比对会误杀，因此去掉标点归一化后再判断。
+    """
+    norm = _CITATION_NOISE.sub("", citation)
+    if not norm:
+        return False
+    if norm in source_norm:
+        return True
+    clause_match = _CLAUSE_RE.search(norm)
+    if not clause_match:
+        return False
+    clause = clause_match.group(0)
+    if clause not in source_norm:
+        return False
+    law_name = norm[:clause_match.start()]
+    if not law_name:
+        return True
+    if law_name in source_norm:
+        return True
+    short = re.sub(r"^(中华人民共和国|中国)", "", law_name)
+    return bool(short and short != law_name and short in source_norm)
+
+
 def _regex_company_name(text: str) -> str | None:
     """提取公司全称的正则兜底：优先取“被申请人/用人单位/被告/申请人”之后的公司名。"""
     pattern = r"([\u4e00-\u9fffA-Za-z0-9（）()]{2,40}?(?:有限责任公司|股份有限公司|有限公司))"
@@ -178,12 +208,13 @@ def grounded_legal_basis(candidates: list[Any], law_snapshot: dict[str, Any] | N
     if law.get("verified") is not True:
         return []
     source_text = json.dumps(law.get("content") or {}, ensure_ascii=False)
+    source_norm = _CITATION_NOISE.sub("", source_text)
     grounded: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in candidates:
         value = item if isinstance(item, dict) else {"citation": item}
         citation = str(value.get("citation") or "").strip()
-        if not citation or citation in seen or citation not in source_text:
+        if not citation or citation in seen or not _citation_in_source(citation, source_norm):
             continue
         seen.add(citation)
         grounded.append(

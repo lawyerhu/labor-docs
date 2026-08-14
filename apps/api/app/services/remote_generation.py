@@ -152,7 +152,10 @@ async def report_generation_result(
 
 def _merge_known_values(current: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     def is_missing(value: Any) -> bool:
-        return value in (None, "", [], {}) or (isinstance(value, str) and value.startswith("[待"))
+        return value in (None, "", [], {}) or (
+            isinstance(value, str)
+            and (value.startswith("[待") or value.startswith("待核实") or value.startswith("待确认"))
+        )
 
     merged = dict(current)
     for key, value in patch.items():

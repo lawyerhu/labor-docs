@@ -228,6 +228,32 @@ def test_mcp_result_text_is_verified():
     assert legal_research.YuandianLegalResearchProvider._mcp_has_results(content) is True
 
 
+def test_grounded_legal_basis_tolerates_book_quotes_and_full_law_names():
+    law = {
+        "verified": True,
+        "source": "yuandian:mcp:law",
+        "retrieved_at": "2026-08-12",
+        "content": {
+            "text": (
+                "劳动合同法 第八十七条 用人单位违反本法规定解除或者终止劳动合同的，"
+                "应当依照本法第四十七条规定的经济补偿标准的二倍向劳动者支付赔偿金。"
+            )
+        },
+    }
+    candidates = [
+        {"citation": "《中华人民共和国劳动合同法》第八十七条"},
+        {"citation": "劳动合同法第八十七条"},
+        {"citation": "劳动争议调解仲裁法第二十一条"},
+    ]
+
+    result = legal_research.grounded_legal_basis(candidates, law)
+
+    citations = [item["citation"] for item in result]
+    assert "《中华人民共和国劳动合同法》第八十七条" in citations
+    assert "劳动合同法第八十七条" in citations
+    assert "劳动争议调解仲裁法第二十一条" not in citations
+
+
 def test_company_name_extraction_uses_llm_understanding(monkeypatch):
     calls = []
 
