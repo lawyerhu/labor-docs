@@ -24,6 +24,15 @@ const generationStageLabels: Record<string, string> = {
 };
 
 const CLOUD_PROCESSING_CONSENT = true;
+const UNSUPPORTED_IMAGE_ERROR = /(?:ERROR:\s*)?Cannot read\s+[^\n]*?\(this model does not support image input\)\.?\s*(?:Inform the user\.)?/gi;
+
+function cleanModelText(value: unknown): string {
+  return String(value ?? "")
+    .replace(UNSUPPORTED_IMAGE_ERROR, "")
+    .replace(/^\s*ERROR:\s*$/gim, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
 export default function CaseWorkspacePage() {
   const params = useParams<{ id: string }>();
@@ -253,9 +262,12 @@ export default function CaseWorkspacePage() {
   }
 
   if (!record) return <main className="workspace-loading"><LoaderCircle className="spin" /> 正在打开案件…</main>;
-  const summary = String(record.data?.analysis?.summary || record.data?.intake?.facts || "");
+  const summary = cleanModelText(record.data?.analysis?.summary || record.data?.intake?.facts || "");
   const analysis = record.data?.analysis as Record<string, any> | undefined;
-  const questions = Array.isArray(analysis?.follow_up_questions) ? analysis.follow_up_questions.map(String).filter(Boolean) : [];
+  const legalAnalysis = cleanModelText(analysis?.legal_analysis);
+  const questions = Array.isArray(analysis?.follow_up_questions)
+    ? analysis.follow_up_questions.map(cleanModelText).filter(Boolean)
+    : [];
   const evidenceRequirements = Array.isArray(record.data?.evidence_requirements)
     ? record.data.evidence_requirements.filter((item: unknown) => item && typeof item === "object")
     : record.evidence_gaps.map((item) => ({ suggested_evidence: item }));
@@ -270,7 +282,7 @@ export default function CaseWorkspacePage() {
         <h1>{analysisPending ? "正在分析案情和诉请" : analysis ? "案情分析完成，补充必要信息" : "先分析案情和诉请"}</h1>
         <p>{summary || "系统会先读取案情和诉请，结合元典类案分析请求权、缺失信息和建议证据。"}</p>
         {analysisPending && <div className="analysis-done"><LoaderCircle size={18} className="spin" /> 正在调用模型和元典分析，请稍候。</div>}
-        {analysis?.legal_analysis && <div className="analysis-done"><Check size={18} /> {String(analysis.legal_analysis)}</div>}
+        {legalAnalysis && <div className="analysis-done"><Check size={18} /> {legalAnalysis}</div>}
         {evidenceRequirements.length > 0 && <div className="evidence-plan">
           <strong><ListChecks size={17} /> 类案和请求权提示的证据</strong>
           <ol>{evidenceRequirements.map((item: any, index: number) => <li key={`${String(item.suggested_evidence || item.evidence || item.name)}-${index}`}><b>{String(item.suggested_evidence || item.evidence || item.name || "建议材料")}</b><small>有则提交，没有也不影响继续生成</small></li>)}</ol>
@@ -310,7 +322,7 @@ export default function CaseWorkspacePage() {
 function EvidenceCard({ item, index, onDelete }: { item: EvidenceItem; index: number; onDelete: () => void }) {
   const processing = item.status === "queued" || item.status === "processing";
   const failed = item.status === "failed";
-  const analysisError = typeof item.analysis?.error === "string" ? item.analysis.error : "本次识别未完成，请删除后重新上传。";
+  const analysisError = cleanModelText(item.analysis?.error) || "本次识别未完成，请删除后重新上传。";
   return <article className="evidence-item">
     <div className="evidence-number">{index + 1}</div>
     <div className="evidence-summary">
