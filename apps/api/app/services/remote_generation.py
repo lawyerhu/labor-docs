@@ -386,6 +386,9 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
         await _report_progress(job_id, "大模型正在分析全案并撰写文书", 50)
         draft = await draft_case_documents(case=case, evidence_items=evidence_items, material_texts=material_texts)
         update_map = {item["id"]: item for item in draft["evidence_updates"]}
+        split_groups: dict[str, list[dict[str, Any]]] = {}
+        for update in draft["evidence_updates"]:
+            split_groups.setdefault(str(update.get("id") or ""), []).append(update)
         for item in evidence_items:
             if item["id"] in update_map:
                 update = update_map[item["id"]]
@@ -394,24 +397,33 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
                 item["_include_in_package"] = update.get("included", True)
                 if update.get("order") is not None:
                     item["_package_order"] = update["order"]
+                group = split_groups.get(str(item["id"])) or []
+                if len(group) > 1:
+                    item["_include_in_package"] = any(
+                        split.get("included", True) is not False for split in group
+                    )
             else:
                 item["_include_in_package"] = True
-        selected_evidence = [item for item in evidence_items if item.get("_include_in_package", True)]
-        if evidence_items and not selected_evidence:
+        selected_evidence = []
+        for item in evidence_items:
+            group = split_groups.get(str(item["id"])) or []
+            # Keep the whole split group until the PDF assembler validates that
+            # its page ranges form a complete partition of the source file.
+            if len(group) > 1:
+                if any(split.get("included", True) is not False for split in group):
+                    selected_evidence.append(item)
+            elif item.get("_include_in_package", True):
+                selected_evidence.append(item)
+        if evidence_items and not selected_evidence and not draft["evidence_updates"]:
             # A malformed model response must not silently discard every uploaded material.
             selected_evidence = evidence_items
             for item in evidence_items:
                 item["_include_in_package"] = True
-        split_groups: dict[str, list[dict[str, Any]]] = {}
-        for update in draft["evidence_updates"]:
-            split_groups.setdefault(str(update.get("id") or ""), []).append(update)
         expanded_evidence: list[dict[str, Any]] = []
         for item in selected_evidence:
             group = split_groups.get(str(item["id"])) or []
             if len(group) > 1:
                 for split in group:
-                    if split.get("included") is False:
-                        continue
                     expanded_evidence.append(
                         {
                             **item,
@@ -419,6 +431,9 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
                             "purpose": str(split.get("purpose") or ""),
                             "_package_order": split.get("order"),
                             "_page_range": split.get("page_range"),
+                            "_include_in_package": split.get("included", True) is not False,
+                            "_split_group": True,
+                            "_split_index": split.get("split_index"),
                         }
                     )
             else:
@@ -477,9 +492,13 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
             analysis["extraction_version"] = 2
         first = group[0]
         selected_for_package = (
-            original.get("_include_in_package", first.get("included", True))
-            if original
-            else first.get("included", True)
+            any(split.get("included", True) is not False for split in group)
+            if len(group) > 1
+            else (
+                original.get("_include_in_package", first.get("included", True))
+                if original
+                else first.get("included", True)
+            )
         )
         analysis["selected_for_package"] = selected_for_package
         if first.get("order") is not None:

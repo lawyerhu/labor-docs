@@ -9,6 +9,7 @@ from app.services.openai_compat import complete_json
 
 
 MAX_DRAFT_MATERIAL_CHARS = 20_000
+_PAGE_MARKER_RE = re.compile(r"(?m)^--- 第(\d+)页 ---\s*$")
 _CASE_DATA_KEYS = (
     "parties",
     "court",
@@ -53,6 +54,27 @@ def _parse_page_range(raw: Any) -> list[int] | None:
         if page >= 1:
             return [page, page]
     return None
+
+
+def _material_text_for_draft(text: str, limit: int = MAX_DRAFT_MATERIAL_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    matches = list(_PAGE_MARKER_RE.finditer(text))
+    if len(matches) < 2:
+        return text[:limit]
+    pages: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        pages.append((match.group(0).strip(), text[match.end():end].strip()))
+    separator = "\n\n"
+    overhead = sum(len(marker) + 1 for marker, _ in pages) + len(separator) * (len(pages) - 1)
+    per_page = max(1, (limit - overhead) // len(pages))
+    return separator.join(f"{marker}\n{content[:per_page]}" for marker, content in pages)
+
+
+def _material_page_count(text: str) -> int | None:
+    pages = [int(match.group(1)) for match in _PAGE_MARKER_RE.finditer(text)]
+    return max(pages) if pages else None
 
 
 def _compact_research(value: Any, limit: int) -> Any:
@@ -116,12 +138,14 @@ async def draft_case_documents(
 ) -> dict[str, Any]:
     evidence = []
     for item in evidence_items:
+        material_text = material_texts.get(item["id"], "")
         evidence.append(
             {
                 "id": item["id"],
                 "current_name": item.get("name"),
                 "current_purpose": item.get("purpose"),
-                "material_text": material_texts.get(item["id"], "")[:MAX_DRAFT_MATERIAL_CHARS],
+                "page_count": _material_page_count(material_text),
+                "material_text": _material_text_for_draft(material_text),
             }
         )
     parsed = await complete_json(
@@ -136,7 +160,7 @@ data_patch：从案件说明及材料中能够可靠提取的结构化信息。�
 - arbitration：committee、award_number、result、service_date、payment_status。
 - evidence_gaps、evidence_requirements：从请求权和类案中整理的可选证据建议；不要把未提交建议写成已存在的证据。
 当材料与用户已确认信息冲突时，不覆盖原值，并在 missing_fields 中写明[待核实：具体冲突]。
-evidence_items：逐项返回 id、name、purpose、include、order。id 必须来自输入材料。当一份材料（正文中的“--- 第N页 ---”分段）确实包含多项相互独立的证据时（例如同一扫描件里既有劳动合同，又有工资流水和解除通知），可对同一 id 返回多项，每项代表一份独立证据，并给出 pages（该项在原文件中的页码范围，如"1-3"或"第1-2页"；单页如"第3页"；不拆分时省略 pages）。单一证据或无法判断页码范围时不要拆。name按材料内容命名，不得使用上传文件名；purpose必须结合诉请写出该证据证明的具体事实。include=false 仅用于与本案请求权和事实无关、重复或无法形成证明作用的材料；有用材料必须为 true。order 是证据在目录和证据合并PDF中的逻辑顺序，不得按上传顺序填写，应按“劳动关系/基础事实→工资考勤及履行→争议发生或解除→仲裁经过及送达→其他补强”的证明链，并结合本案请求权和事实时间线确定。不要返回来源字段。
+evidence_items：逐项返回 id、name、purpose、include、order。id 必须来自输入材料。输入中的 page_count 是该原文件的总页数，页码以原文件为准。当一份材料（正文中的“--- 第N页 ---”分段）确实包含多项相互独立的证据时（例如同一扫描件里既有劳动合同，又有工资流水和解除通知），可对同一 id 返回多项，每项代表一份独立证据，并给出 pages（该项在原文件中的页码范围，如"1-3"或"第1-2页"；单页如"第3页"；不拆分时省略 pages）。拆分后的 pages 必须完整覆盖 1 至 page_count 的全部页码且不得重叠；无法完整覆盖、无法判断边界或单一证据时不要拆。name按材料内容命名，不得使用上传文件名；purpose必须结合诉请写出该证据证明的具体事实。include=false 仅用于与本案请求权和事实无关、重复或无法形成证明作用的材料；有用材料必须为 true。order 是证据在目录和证据合并PDF中的逻辑顺序，不得按上传顺序填写，应按“劳动关系/基础事实→工资考勤及履行→争议发生或解除→仲裁经过及送达→其他补强”的证明链，并结合本案请求权和事实时间线确定。不要返回来源字段。
 verified_law：对象数组，每项只包含 citation。只能使用输入 legal_research.law 中已标记 verified=true 且 citation 原文能从其 content 核对的法条；无法核验时返回空数组，并在正文相应位置使用[待核验法律依据]，不得在末尾单独罗列。
 missing_fields：仅列影响提交或诉请计算且无法从材料得出的关键信息。不要为可由正文自然表述的信息制造占位符。
 语气专业克制，避免“保证胜诉”等结论。""",

@@ -232,6 +232,20 @@ def test_draft_splits_multi_evidence_material_into_separate_catalog_entries(monk
     assert other[0]["page_range"] == [1, 1]
 
 
+def test_long_material_prompt_keeps_all_page_markers():
+    text = "\n\n".join(
+        f"--- 第{page}页 ---\n" + (f"第{page}页正文。" * 500)
+        for page in range(1, 41)
+    )
+
+    compact = drafting._material_text_for_draft(text)
+
+    assert len(compact) <= drafting.MAX_DRAFT_MATERIAL_CHARS
+    assert "--- 第1页 ---" in compact
+    assert "--- 第20页 ---" in compact
+    assert "--- 第40页 ---" in compact
+
+
 def test_draft_ignores_unparsable_pages_without_dropping_evidence(monkeypatch):
     async def complete_json(**_kwargs):
         return {

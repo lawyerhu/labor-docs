@@ -94,6 +94,78 @@ def test_split_evidence_extracts_only_referenced_pages_in_catalog_order(tmp_path
     assert result.readiness == "formal_with_placeholders"
 
 
+def test_invalid_split_partition_keeps_the_entire_source_file(tmp_path: Path):
+    bundle = tmp_path / "bundle.pdf"
+    _make_pdf(bundle, "bundle", 5)
+    result = build_case_package(
+        case_id="case-invalid-split",
+        payload={"case_stage": "litigation", "party_side": "worker", "data": {}},
+        evidence_items=[
+            {
+                "id": "bundle",
+                "name": "劳动合同",
+                "purpose": "证明劳动关系。",
+                "stored_path": str(bundle),
+                "_split_group": True,
+                "_split_index": 0,
+                "_include_in_package": True,
+                "_page_range": [1, 2],
+            },
+            {
+                "id": "bundle",
+                "name": "微信支付明细",
+                "purpose": "证明工资标准。",
+                "stored_path": str(bundle),
+                "_split_group": True,
+                "_split_index": 1,
+                "_include_in_package": True,
+                "_page_range": [4, 5],
+            },
+        ],
+        output_dir=tmp_path,
+    )
+
+    evidence = tmp_path / "case-invalid-split" / "03-证据材料.pdf"
+    assert len(PdfReader(evidence).pages) == 5
+    catalog = Document(tmp_path / "case-invalid-split" / "02-证据目录.docx")
+    assert len(catalog.tables[0].rows) == 2
+    assert catalog.tables[0].rows[1].cells[1].text == "劳动合同"
+    assert result.readiness == "formal_with_placeholders"
+
+
+def test_explicitly_excluded_split_is_omitted_only_after_complete_partition(tmp_path: Path):
+    bundle = tmp_path / "bundle.pdf"
+    _make_pdf(bundle, "bundle", 3)
+    build_case_package(
+        case_id="case-excluded-split",
+        payload={"case_stage": "litigation", "party_side": "worker", "data": {}},
+        evidence_items=[
+            {
+                "id": "bundle",
+                "name": "劳动合同",
+                "purpose": "证明劳动关系。",
+                "stored_path": str(bundle),
+                "_split_group": True,
+                "_include_in_package": True,
+                "_page_range": [1, 2],
+            },
+            {
+                "id": "bundle",
+                "name": "无关广告页",
+                "purpose": "与本案无关。",
+                "stored_path": str(bundle),
+                "_split_group": True,
+                "_include_in_package": False,
+                "_page_range": [3, 3],
+            },
+        ],
+        output_dir=tmp_path,
+    )
+
+    evidence = tmp_path / "case-excluded-split" / "03-证据材料.pdf"
+    assert len(PdfReader(evidence).pages) == 2
+
+
 def test_package_survives_string_facts_and_arbitration(tmp_path: Path):
     data = {
         "employment_facts": "申请人2023年7月12日入职，任实施工程师。",

@@ -462,22 +462,99 @@ def _footer_overlay(width: float, height: float, page: int, total: int) -> Any:
     return PdfReader(stream).pages[0]
 
 
-def _assemble_evidence(evidence: list[dict[str, Any]], path: Path) -> list[str]:
+def _valid_split_partition(group: list[dict[str, Any]], page_count: int) -> bool:
+    ranges: list[tuple[int, int]] = []
+    for item in group:
+        page_range = item.get("_page_range")
+        if not isinstance(page_range, (list, tuple)) or len(page_range) != 2:
+            return False
+        try:
+            start, end = int(page_range[0]), int(page_range[1])
+        except (TypeError, ValueError):
+            return False
+        if start < 1 or end < start or end > page_count:
+            return False
+        ranges.append((start, end))
+    expected = 1
+    for start, end in sorted(ranges):
+        if start != expected:
+            return False
+        expected = end + 1
+    return expected == page_count + 1
+
+
+def _normalize_evidence_for_assembly(
+    evidence: list[dict[str, Any]],
+    readers: dict[tuple[str, str], PdfReader],
+) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for item in evidence:
+        if item.get("_split_group"):
+            key = (str(item.get("id") or ""), str(Path(item["stored_path"])))
+            groups.setdefault(key, []).append(item)
+
+    normalized: list[dict[str, Any]] = []
+    handled: set[tuple[str, str]] = set()
+    for item in evidence:
+        if item.get("_split_group"):
+            key = (str(item.get("id") or ""), str(Path(item["stored_path"])))
+            if key in handled:
+                continue
+            handled.add(key)
+            group = groups[key]
+            reader = readers[key]
+            if _valid_split_partition(group, len(reader.pages)):
+                normalized.extend(
+                    split for split in group if split.get("_include_in_package", True)
+                )
+                continue
+            # Never silently discard pages when the model returned an incomplete
+            # or overlapping partition. Keep the original file intact.
+            fallback = next(
+                (split for split in group if split.get("_include_in_package", True)),
+                group[0],
+            )
+            normalized.append(
+                {
+                    **fallback,
+                    "_split_group": False,
+                    "_page_range": None,
+                    "_include_in_package": True,
+                }
+            )
+            continue
+        if item.get("_include_in_package", True):
+            normalized.append(item)
+    return normalized
+
+
+def _assemble_evidence(
+    evidence: list[dict[str, Any]], path: Path
+) -> tuple[list[dict[str, Any]], list[str]]:
     with tempfile.TemporaryDirectory(prefix="labor-docs-") as temporary:
         temp_dir = Path(temporary)
         converted: dict[Path, Path] = {}
-        sources: list[tuple[dict[str, Any], PdfReader, int, int]] = []
         for item in evidence:
             stored_path = Path(item["stored_path"])
             if stored_path not in converted:
                 converted[stored_path] = _source_pdf(stored_path, temp_dir)
-            reader = PdfReader(converted[stored_path])
+        readers = {
+            (str(item.get("id") or ""), str(Path(item["stored_path"]))): PdfReader(
+                converted[Path(item["stored_path"])]
+            )
+            for item in evidence
+            if item.get("_split_group")
+        }
+        normalized = _normalize_evidence_for_assembly(evidence, readers)
+        sources: list[tuple[dict[str, Any], PdfReader, int, int]] = []
+        for item in normalized:
+            reader = PdfReader(converted[Path(item["stored_path"])])
             start, end = 1, len(reader.pages)
             page_range = item.get("_page_range")
             if isinstance(page_range, (list, tuple)) and len(page_range) == 2:
                 lo, hi = int(page_range[0]), int(page_range[1])
-                start = max(1, min(lo, end))
-                end = min(end, max(start, hi))
+                if 1 <= lo <= hi <= end:
+                    start, end = lo, hi
             sources.append((item, reader, start, end))
         total = sum(end - start + 1 for _, _, start, end in sources)
         writer = PdfWriter()
@@ -499,7 +576,7 @@ def _assemble_evidence(evidence: list[dict[str, Any]], path: Path) -> list[str]:
         writer.add_metadata({"/Title": "证据材料", "/Author": ""})
         with path.open("wb") as output:
             writer.write(output)
-    return page_ranges
+    return normalized, page_ranges
 
 
 def _build_catalog(path: Path, evidence: list[dict[str, Any]], page_ranges: list[str]) -> None:
@@ -556,7 +633,7 @@ def build_case_package(
     page_ranges: list[str] = []
     if evidence_items:
         evidence_path = case_dir / "03-证据材料.pdf"
-        page_ranges = _assemble_evidence(evidence_items, evidence_path)
+        evidence_items, page_ranges = _assemble_evidence(evidence_items, evidence_path)
     catalog = case_dir / "02-证据目录.docx"
     _build_catalog(catalog, evidence_items, page_ranges)
     artifacts.append(GeneratedArtifact("evidence_catalog", catalog.name, catalog))
