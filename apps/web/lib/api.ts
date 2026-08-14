@@ -28,6 +28,26 @@ export interface GenerationJob {
   error?: string;
 }
 
+export interface CaseStatus {
+  status: string;
+  analysis_pending: boolean;
+  analysis_status: string;
+  materials_processing: boolean;
+  job: GenerationJob | null;
+}
+
+const REQUEST_TIMEOUT_MS = 30_000;
+
+function withTimeout(init?: RequestInit): RequestInit {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  init?.signal?.addEventListener("abort", () => controller.abort(), { once: true });
+  return {
+    ...init,
+    signal: controller.signal,
+  };
+}
+
 export interface Artifact {
   id: string;
   filename: string;
@@ -58,11 +78,11 @@ export interface CaseRecord {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetch(path, withTimeout({
     credentials: "include",
     ...init,
     headers: init?.body instanceof FormData ? init.headers : { "Content-Type": "application/json", ...init?.headers },
-  });
+  }));
   if (!response.ok) {
     let message = "请求失败，请稍后重试";
     try {
@@ -99,6 +119,8 @@ export function uploadEvidence(
       else reject(new Error(body.detail || "证据上传失败"));
     });
     request.addEventListener("error", () => reject(new Error("网络中断，证据上传失败")));
+    request.addEventListener("timeout", () => reject(new Error("上传超时，请检查网络后重试")));
+    request.timeout = 10 * 60 * 1000;
     const form = new FormData();
     form.append("file", file);
     form.append("consent_cloud_processing", String(consentCloudProcessing));

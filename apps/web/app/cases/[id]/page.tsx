@@ -4,7 +4,7 @@ import { AlertCircle, ArrowLeft, Check, Download, FileText, Info, ListChecks, Lo
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { api, Artifact, CaseRecord, EvidenceItem, GenerationJob, uploadEvidence } from "@/lib/api";
+import { api, Artifact, CaseRecord, CaseStatus, EvidenceItem, GenerationJob, uploadEvidence } from "@/lib/api";
 
 const stageLabels: Record<string, string> = {
   queued: "等待处理",
@@ -37,10 +37,15 @@ export default function CaseWorkspacePage() {
   const [generationJobId, setGenerationJobId] = useState<string | null>(null);
   const [analysisBusy, setAnalysisBusy] = useState(false);
   const [supplement, setSupplement] = useState("");
+  const reloadSeq = useRef(0);
 
   async function reload() {
-    try { setRecord(await api<CaseRecord>(`/api/cases/${params.id}`)); }
-    catch (reason) {
+    const sequence = ++reloadSeq.current;
+    try {
+      const fresh = await api<CaseRecord>(`/api/cases/${params.id}`);
+      if (sequence === reloadSeq.current) setRecord(fresh);
+    } catch (reason) {
+      if (sequence !== reloadSeq.current) return;
       const typed = reason as Error & { status?: number };
       if (typed.status === 401) router.replace("/login");
       else setError(typed.message);
@@ -48,47 +53,17 @@ export default function CaseWorkspacePage() {
   }
 
   useEffect(() => { reload(); }, [params.id]);
-  useEffect(() => {
-    let cancelled = false;
-    api<GenerationJob | null>(`/api/cases/${params.id}/generation-jobs/active`)
-      .then((job) => {
-        if (cancelled || !job) return;
-        setBusy(true);
-        setGeneration({ stage: generationStageLabels[job.stage] || job.stage || "正在处理", progress: job.progress || 5 });
-        setGenerationJobId(job.id);
-      })
-      .catch((reason) => {
-        const typed = reason as Error & { status?: number };
-        if (!cancelled && typed.status === 401) router.replace("/login");
-      });
-    return () => { cancelled = true; };
-  }, [params.id, router]);
 
   useEffect(() => {
-    if (!generationJobId) return;
     let cancelled = false;
     let timer: number | undefined;
+    let backoff = 1500;
+    let last: CaseStatus | null = null;
 
-    async function poll() {
+    async function tick() {
+      let status: CaseStatus | null = null;
       try {
-        const job = await api<GenerationJob>(`/api/cases/${params.id}/generation-jobs/${generationJobId}`);
-        if (cancelled) return;
-        setGeneration({ stage: generationStageLabels[job.stage] || job.stage || "正在处理", progress: job.progress || 5 });
-        if (job.status === "failed") {
-          setError(job.error || "生成失败");
-          setGenerationJobId(null);
-          setGeneration(null);
-          setBusy(false);
-          return;
-        }
-        if (job.status === "completed") {
-          setGenerationJobId(null);
-          setGeneration(null);
-          setBusy(false);
-          await reload();
-          return;
-        }
-        timer = window.setTimeout(poll, 1500);
+        status = await api<CaseStatus>(`/api/cases/${params.id}/status`);
       } catch (reason) {
         if (cancelled) return;
         const typed = reason as Error & { status?: number };
@@ -96,30 +71,55 @@ export default function CaseWorkspacePage() {
           router.replace("/login");
           return;
         }
-        timer = window.setTimeout(poll, 3000);
+        backoff = Math.min(backoff + 1000, 5000);
+        timer = window.setTimeout(tick, backoff);
+        return;
+      }
+      if (cancelled || !status) return;
+      const job = status.job;
+      if (job) {
+        setBusy(true);
+        setGeneration({ stage: generationStageLabels[job.stage] || job.stage || "正在处理", progress: job.progress || 5 });
+        if (job.status === "failed" || job.status === "completed") {
+          setBusy(false);
+          setGeneration(null);
+          setGenerationJobId(null);
+          if (job.status === "failed") setError(job.error || "生成失败");
+          await reload();
+          return;
+        }
+      } else if (last?.job) {
+        setBusy(false);
+        setGeneration(null);
+        setGenerationJobId(null);
+        await reload();
+        return;
+      }
+      const settled = last
+        ? (last.analysis_pending && !status.analysis_pending) || (last.materials_processing && !status.materials_processing)
+        : false;
+      if (status.analysis_pending || status.materials_processing || job) {
+        if (settled) await reload();
+        last = status;
+        backoff = Math.min(backoff + 1000, 5000);
+        timer = window.setTimeout(tick, backoff);
+        return;
+      }
+      if (last) {
+        last = null;
+        await reload();
       }
     }
 
-    void poll();
+    void tick();
     return () => {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [generationJobId, params.id, router]);
+  }, [params.id, generationJobId, router]);
 
   const materialProcessing = Boolean(record?.evidence?.some((item) => item.status === "queued" || item.status === "processing"));
   const analysisPending = record?.data?.analysis?.status === "pending";
-  useEffect(() => {
-    if (!analysisPending) return;
-    const timer = window.setInterval(reload, 1500);
-    return () => window.clearInterval(timer);
-  }, [analysisPending, params.id]);
-
-  useEffect(() => {
-    if (!materialProcessing) return;
-    const timer = window.setInterval(reload, 1500);
-    return () => window.clearInterval(timer);
-  }, [materialProcessing, params.id]);
 
   async function uploadFiles(files: FileList | null) {
     if (!files?.length) return;
@@ -223,6 +223,35 @@ export default function CaseWorkspacePage() {
     }
   }
 
+  async function downloadArtifact(artifact: Artifact) {
+    setBusy(true); setError("");
+    try {
+      const response = await fetch(`/api/cases/${record!.id}/artifacts/${artifact.id}`, { credentials: "include" });
+      if (!response.ok) {
+        let message = `下载失败（HTTP ${response.status}）`;
+        try {
+          const body = await response.json();
+          message = body.detail ?? message;
+        } catch { /* keep default message */ }
+        if (response.status === 401) router.replace("/login");
+        throw new Error(message);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = artifact.filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "下载失败，请稍后重试");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!record) return <main className="workspace-loading"><LoaderCircle className="spin" /> 正在打开案件…</main>;
   const summary = String(record.data?.analysis?.summary || record.data?.intake?.facts || "");
   const analysis = record.data?.analysis as Record<string, any> | undefined;
@@ -271,7 +300,7 @@ export default function CaseWorkspacePage() {
         <button className="button button-primary button-large generate-button" onClick={generate} disabled={busy || materialProcessing || (record.access_status === "locked" && !record.unlimited_generation) || (!record.unlimited_generation && record.generation_count >= 3)}>{busy ? <><LoaderCircle className="spin" /> 正在生成…</> : <><Sparkles size={19} /> 大模型撰写并生成正式材料</>}<span>{record.unlimited_generation ? `${record.generation_count} 次 · 不限量` : `${record.generation_count}/3 次`}</span></button>
         {materialProcessing && <div className="form-hint">材料仍在识别，完成后即可生成。</div>}
         {record.access_status === "locked" && !record.unlimited_generation && <div className="form-error">该案件需要兑换码后才能生成。</div>}
-        {!!record.artifacts?.length && <div className="downloads">{record.artifacts.map((artifact) => <a className="download-row" href={`/api/cases/${record.id}/artifacts/${artifact.id}`} key={artifact.id}><FileText size={19} /><span><strong>{artifact.filename}</strong><small>点击下载</small></span><Download size={18} /></a>)}</div>}
+        {!!record.artifacts?.length && <div className="downloads">{record.artifacts.map((artifact) => <button className="download-row" onClick={() => downloadArtifact(artifact)} key={artifact.id} disabled={busy}><FileText size={19} /><span><strong>{artifact.filename}</strong><small>点击下载</small></span><Download size={18} /></button>)}</div>}
         <div className="legal-note"><Info size={17} /><p>系统会结合已核验的法律检索结果进行撰写；无法核验的具体条款不会被编造。</p></div>
       </div>
     </section>

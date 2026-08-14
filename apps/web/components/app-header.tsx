@@ -9,7 +9,11 @@ export function AppHeader({ email }: { email?: string }) {
   const router = useRouter();
 
   async function logout() {
-    await api("/api/auth/logout", { method: "POST" });
+    try {
+      await api("/api/auth/logout", { method: "POST" });
+    } catch {
+      // 即使登出请求失败也回到登录页，避免卡在已失效会话。
+    }
     router.push("/login");
     router.refresh();
   }

@@ -16,10 +16,18 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    Promise.all([api<{ email: string }>("/api/auth/me"), api<CaseRecord[]>("/api/cases")])
-      .then(([user, records]) => { setEmail(user.email); setCases(records); })
-      .catch((reason: Error & { status?: number }) => reason.status === 401 ? router.replace("/login") : setError(reason.message))
-      .finally(() => setLoading(false));
+    let cancelled = false;
+    Promise.allSettled([
+      api<{ email: string }>("/api/auth/me"),
+      api<CaseRecord[]>("/api/cases"),
+    ]).then(([userResult, casesResult]) => {
+      if (cancelled) return;
+      if (userResult.status === "fulfilled") setEmail(userResult.value.email);
+      else if ((userResult.reason as Error & { status?: number })?.status === 401) router.replace("/login");
+      if (casesResult.status === "fulfilled") setCases(casesResult.value);
+      else setError((casesResult.reason as Error)?.message || "案件列表加载失败");
+    }).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [router]);
 
   async function deleteCase(record: CaseRecord) {

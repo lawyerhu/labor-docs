@@ -1,6 +1,6 @@
 import type { NextConfig } from "next";
 
-const apiBase = process.env.API_INTERNAL_URL ?? "http://127.0.0.1:8000";
+const apiBase = process.env.API_INTERNAL_URL ?? "https://labor-docs-api.fayan-research.workers.dev";
 
 const nextConfig: NextConfig = {
   async rewrites() {

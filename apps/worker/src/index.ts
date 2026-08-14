@@ -712,7 +712,65 @@ async function listCases(request: Request, env: Env): Promise<Response> {
   const rows = await env.DB.prepare(
     "SELECT id, user_id, title, case_stage, party_side, status, access_status, data_json, generation_count, generation_version, created_at, expires_at FROM cases WHERE user_id = ? ORDER BY created_at DESC",
   ).bind(user.id).all<CaseRow>();
-  return json(await Promise.all(rows.results.map((row) => casePayload(env, row, user))));
+  return json(
+    rows.results.map((row) => {
+      const data = parseCaseData(row.data_json);
+      return {
+        id: row.id,
+        title: row.title,
+        case_stage: row.case_stage,
+        party_side: row.party_side,
+        status: row.status,
+        access_status: row.access_status,
+        generation_count: row.generation_count,
+        generation_version: row.generation_version,
+        unlimited_generation: isTestAdmin(env, user),
+        created_at: row.created_at,
+        expires_at: row.expires_at,
+        ...readinessFor(row, data),
+      };
+    }),
+  );
+}
+
+type CaseStatusPayload = {
+  status: string;
+  analysis_pending: boolean;
+  analysis_status: string;
+  materials_processing: boolean;
+  job: {
+    id: string;
+    status: string;
+    stage: string;
+    progress: number;
+    error?: string;
+  } | null;
+};
+
+async function getCaseStatus(request: Request, env: Env, caseId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  const row = owned.row;
+  const data = parseCaseData(row.data_json);
+  const analysis = data.analysis && typeof data.analysis === "object"
+    ? data.analysis as Record<string, unknown>
+    : {};
+  const evidence = await env.DB.prepare(
+    "SELECT id, status FROM evidence WHERE case_id = ? AND status IN ('queued', 'processing') LIMIT 1",
+  ).bind(caseId).all<{ id: string; status: string }>();
+  const job = await env.DB.prepare(
+    "SELECT id, status, stage, progress, error FROM generation_jobs WHERE case_id = ? AND status NOT IN ('completed', 'failed') ORDER BY created_at DESC LIMIT 1",
+  ).bind(caseId).first<{ id: string; status: string; stage: string; progress: number; error?: string }>();
+  const payload: CaseStatusPayload = {
+    status: row.status,
+    analysis_pending: analysis.status === "pending",
+    analysis_status: typeof analysis.status === "string" ? analysis.status : "none",
+    materials_processing: evidence.results.length > 0,
+    job: job
+      ? { id: job.id, status: job.status, stage: job.stage, progress: job.progress, error: job.error }
+      : null,
+  };
+  return json(payload);
 }
 
 async function createCase(request: Request, env: Env): Promise<Response> {
@@ -1682,6 +1740,7 @@ export default {
       if (request.method === "POST" && subpath === "evidence") return uploadEvidence(request, env, caseId);
       if (request.method === "POST" && subpath === "generate") return generateCase(request, env, caseId);
       if (request.method === "POST" && subpath === "legal-search") return legalSearch(request, env, caseId);
+      if (request.method === "GET" && subpath === "status") return getCaseStatus(request, env, caseId);
       if (request.method === "GET" && subpath === "generation-jobs/active") {
         return getActiveGenerationJob(request, env, caseId);
       }
