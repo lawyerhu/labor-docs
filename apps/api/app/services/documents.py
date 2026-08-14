@@ -138,7 +138,10 @@ def _heading(document: Document, text: str) -> None:
 
 
 def _party_text(data: dict[str, Any], role: str, prefix: str) -> list[str]:
-    party = data.get("parties", {}).get(role, {})
+    parties = data.get("parties")
+    party = parties.get(role) if isinstance(parties, dict) else None
+    if not isinstance(party, dict):
+        party = {}
     party_type = party.get("type") or ("company" if party.get("credit_code") else "individual")
     lines = [f"{prefix}：{party.get('name') or f'[待填入：{prefix}名称]'}。"]
     if party_type == "company":
@@ -187,10 +190,14 @@ def _claim_lines(data: dict[str, Any], stage: str) -> list[str]:
 
 
 def _fact_text(data: dict[str, Any], stage: str) -> list[str]:
-    drafted = (data.get("_ai_draft") or {}).get("facts_and_reasons") or []
-    if drafted:
-        return [_strip_fact_heading(item) for item in drafted if _strip_fact_heading(item)]
-    employment = data.get("employment_facts") or {}
+    drafted = data.get("_ai_draft") or {}
+    drafted = drafted if isinstance(drafted, dict) else {}
+    drafted_claims = drafted.get("facts_and_reasons") or []
+    if drafted_claims:
+        return [_strip_fact_heading(item) for item in drafted_claims if _strip_fact_heading(item)]
+    employment = data.get("employment_facts")
+    if not isinstance(employment, dict):
+        employment = {"summary": str(employment) if employment else ""}
     facts = [
         f"申请人/原告于{employment.get('start_date') or '[待填入：入职日期]'}入职，"
         f"工作岗位为{employment.get('position') or '[待填入：工作岗位]'}，"
@@ -198,7 +205,9 @@ def _fact_text(data: dict[str, Any], stage: str) -> list[str]:
         employment.get("summary") or "[待填入：劳动关系、工资支付、工作管理及解除经过等基本案情]",
     ]
     if stage == "litigation":
-        arbitration = data.get("arbitration") or {}
+        arbitration = data.get("arbitration")
+        if not isinstance(arbitration, dict):
+            arbitration = {}
         facts.append(
             f"本案经{arbitration.get('committee') or '[待填入：仲裁委员会]'}审理，作出"
             f"{arbitration.get('award_number') or '[待填入：仲裁裁决书案号]'}裁决，裁决结果为："
@@ -209,8 +218,11 @@ def _fact_text(data: dict[str, Any], stage: str) -> list[str]:
             f"履行情况为{arbitration.get('payment_status') or '[待填入：是否履行及已付款金额]'}。"
         )
     conflicts = data.get("unresolved_conflicts") or []
+    if not isinstance(conflicts, list):
+        conflicts = []
     facts.extend(f"[待核实：{item}]" for item in conflicts)
-    legal = [item.get("citation") for item in data.get("legal_basis") or [] if item.get("verified")]
+    basis = data.get("legal_basis") or []
+    legal = [item.get("citation") for item in basis if isinstance(item, dict) and item.get("verified")]
     facts.append("法律依据：" + "；".join(legal) if legal else "[待核验法律依据]")
     return facts
 
@@ -322,7 +334,9 @@ def _build_element_complaint(path: Path, payload: dict[str, Any]) -> None:
     _configure_document(document)
     _title(document, "民事起诉状（劳动争议要素式）")
     facts = _fact_text(data, "litigation")
-    arbitration = data.get("arbitration") or {}
+    arbitration = data.get("arbitration")
+    if not isinstance(arbitration, dict):
+        arbitration = {}
     arbitration_text = (
         f"本案经{arbitration.get('committee')}审理，作出{arbitration.get('award_number')}裁决，"
         f"原告于{arbitration.get('service_date')}收到裁决。"

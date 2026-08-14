@@ -68,6 +68,10 @@ def _normalise_data_patch(value: Any) -> dict[str, Any]:
         "jurisdiction",
     }
     patch = {key: item for key, item in value.items() if key in allowed and item not in (None, "", [], {})}
+    if "employment_facts" in patch and not isinstance(patch["employment_facts"], dict):
+        patch["employment_facts"] = {"summary": str(patch["employment_facts"]).strip()}
+    if "arbitration" in patch and not isinstance(patch["arbitration"], dict):
+        patch.pop("arbitration")
     if "claims" in patch:
         claims = patch["claims"] if isinstance(patch["claims"], list) else []
         normalised_claims = []

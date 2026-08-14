@@ -69,8 +69,11 @@ def assess_readiness(payload: dict[str, Any]) -> ReadinessAssessment:
 
     conflicts = [str(item) for item in data.get("unresolved_conflicts", []) if item]
     legal_basis = data.get("legal_basis") or []
-    unverified = [str(item.get("citation") or "法律依据") for item in legal_basis if not item.get("verified")]
-    if not legal_basis:
+    if not isinstance(legal_basis, list):
+        legal_basis = []
+    items = [item for item in legal_basis if isinstance(item, dict)]
+    unverified = [str(item.get("citation") or "法律依据") for item in items if not item.get("verified")]
+    if not items:
         unverified.append("法律依据")
     evidence_gaps = [str(item) for item in data.get("evidence_gaps", []) if item]
     readiness = "formal_complete" if not missing and not conflicts and not unverified else "formal_with_placeholders"

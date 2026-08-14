@@ -1,7 +1,7 @@
 import asyncio
 
 import app.services.case_analysis as case_analysis
-from app.services.case_analysis import CaseAnalyzer, SENSITIVE_TERMS, _fallback, _ground_legal_basis, _route
+from app.services.case_analysis import CaseAnalyzer, SENSITIVE_TERMS, _fallback, _ground_legal_basis, _normalise_data_patch, _route
 from app.services.legal_research import LegalSnapshot
 
 
@@ -21,6 +21,20 @@ def test_second_round_never_asks_again():
 
 def test_route_recognizes_company_litigation_side():
     assert _route("本公司不服仲裁裁决，拟向法院起诉") == ("litigation", "employer")
+
+
+def test_data_patch_normalises_string_facts_and_drops_string_arbitration():
+    patch = _normalise_data_patch(
+        {
+            "employment_facts": "申请人2023年入职被申请人某公司。",
+            "arbitration": "待确认：尚未见已申请劳动仲裁的记载。",
+            "claims": [{"kind": "劳动报酬", "title": "支付工资", "basis": "待计算"}],
+        }
+    )
+
+    assert patch["employment_facts"] == {"summary": "申请人2023年入职被申请人某公司。"}
+    assert "arbitration" not in patch
+    assert patch["claims"][0]["title"] == "支付工资"
 
 
 def test_legal_basis_must_be_present_in_verified_yuandian_result():

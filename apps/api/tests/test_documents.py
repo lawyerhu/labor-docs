@@ -42,6 +42,34 @@ def test_litigation_package_with_missing_facts_contains_placeholders(tmp_path: P
     assert catalog.sections[0].page_width > catalog.sections[0].page_height
 
 
+def test_package_survives_string_facts_and_arbitration(tmp_path: Path):
+    data = {
+        "employment_facts": "申请人2023年7月12日入职，任实施工程师。",
+        "arbitration": "待确认：尚未见已申请劳动仲裁的记载。",
+        "court": "待核实：企业信息查询未返回结果。",
+        "claims": [{"kind": "劳动报酬", "title": "支付年终结算款1540元", "basis": "待计算"}],
+        "evidence_requirements": [
+            {"suggested_evidence": "劳动合同", "fact_to_prove": "证明劳动关系", "status": "not_submitted"}
+        ],
+        "legal_basis": ["某条字符串法条"],
+        "parties": None,
+    }
+
+    result = build_case_package(
+        case_id="case-strings",
+        payload={"case_stage": "litigation", "party_side": "worker", "data": data},
+        evidence_items=[],
+        output_dir=tmp_path,
+    )
+
+    names = {artifact.filename for artifact in result.artifacts}
+    assert names == {"01A-民事起诉状（要素式）.docx", "01B-民事起诉状（普通式）.docx", "02-证据目录.docx"}
+    ordinary = tmp_path / "case-strings" / "01B-民事起诉状（普通式）.docx"
+    text = _all_text(ordinary)
+    assert "申请人2023年7月12日入职" in text
+    assert "[待核验法律依据]" in text
+
+
 def test_evidence_package_uses_actual_files_and_continuous_pages(tmp_path: Path):
     source_a = tmp_path / "a.pdf"
     source_b = tmp_path / "b.pdf"
