@@ -108,6 +108,13 @@ export default function CaseWorkspacePage() {
   }, [generationJobId, params.id, router]);
 
   const materialProcessing = Boolean(record?.evidence?.some((item) => item.status === "queued" || item.status === "processing"));
+  const analysisPending = record?.data?.analysis?.status === "pending";
+  useEffect(() => {
+    if (!analysisPending) return;
+    const timer = window.setInterval(reload, 1500);
+    return () => window.clearInterval(timer);
+  }, [analysisPending, params.id]);
+
   useEffect(() => {
     if (!materialProcessing) return;
     const timer = window.setInterval(reload, 1500);
@@ -231,8 +238,9 @@ export default function CaseWorkspacePage() {
 
       <div className="analysis-card">
         <div className="eyebrow"><span /> 案情与证据分析</div>
-        <h1>{analysis ? "案情分析完成，补充必要信息" : "先分析案情和诉请"}</h1>
+        <h1>{analysisPending ? "正在分析案情和诉请" : analysis ? "案情分析完成，补充必要信息" : "先分析案情和诉请"}</h1>
         <p>{summary || "系统会先读取案情和诉请，结合元典类案分析请求权、缺失信息和建议证据。"}</p>
+        {analysisPending && <div className="analysis-done"><LoaderCircle size={18} className="spin" /> 正在调用模型和元典分析，请稍候。</div>}
         {analysis?.legal_analysis && <div className="analysis-done"><Check size={18} /> {String(analysis.legal_analysis)}</div>}
         {evidenceRequirements.length > 0 && <div className="evidence-plan">
           <strong><ListChecks size={17} /> 类案和请求权提示的证据</strong>
@@ -244,7 +252,7 @@ export default function CaseWorkspacePage() {
           <textarea rows={4} value={supplement} onChange={(event) => setSupplement(event.target.value)} placeholder="可以一次性回答上面的多个问题，也可以说明暂时无法提供。" />
           <button className="button button-secondary" onClick={submitSupplement} disabled={analysisBusy}><Send size={16} /> 合并补充信息</button>
         </div>}
-        {(!analysis || analysis.analysis_status === "fallback") && <button className="button button-secondary" onClick={() => analyzeCase()} disabled={analysisBusy}><Sparkles size={17} /> {analysisBusy ? "正在分析…" : analysis ? "重新分析案情和诉请" : "开始分析案情和诉请"}</button>}
+        {!analysisPending && (!analysis || analysis.analysis_status === "fallback") && <button className="button button-secondary" onClick={() => analyzeCase()} disabled={analysisBusy}><Sparkles size={17} /> {analysisBusy ? "正在分析…" : analysis ? "重新分析案情和诉请" : "开始分析案情和诉请"}</button>}
       </div>
 
       <div className="evidence-card">

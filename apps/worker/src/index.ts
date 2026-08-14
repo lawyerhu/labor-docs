@@ -14,7 +14,14 @@ interface EvidenceAnalysisMessage {
   requested_at: string;
 }
 
-type QueueMessage = GenerationMessage | EvidenceAnalysisMessage;
+interface CaseAnalysisMessage {
+  type: "case_analysis";
+  version: 1;
+  case_id: string;
+  requested_at: string;
+}
+
+type QueueMessage = GenerationMessage | EvidenceAnalysisMessage | CaseAnalysisMessage;
 
 interface Env {
   DB: D1Database;
@@ -35,7 +42,7 @@ const GENERATION_STALE_MS = 30 * 60 * 1000;
 const EVIDENCE_ANALYSIS_TIMEOUT_MS = 3 * 60 * 1000;
 const EVIDENCE_ANALYSIS_MAX_ATTEMPTS = 3;
 const EVIDENCE_STALE_MS = 15 * 60 * 1000;
-const CASE_ANALYSIS_TIMEOUT_MS = 20 * 1000;
+const CASE_ANALYSIS_TIMEOUT_MS = 120 * 1000;
 
 type PublicUser = { id: string; email: string; unlimited_generation?: boolean };
 
@@ -758,17 +765,50 @@ async function chatCase(request: Request, env: Env, caseId: string): Promise<Res
   const data = parseCaseData(owned.row.data_json);
   const intake = data.intake && typeof data.intake === "object" ? data.intake as Record<string, unknown> : {};
   const priorAnalysis = data.analysis && typeof data.analysis === "object" ? data.analysis as Record<string, unknown> : {};
+  if (priorAnalysis.status === "pending") return json({ status: "pending", analysis: priorAnalysis }, { status: 202 });
   if (priorAnalysis.round === 2) return json({ detail: "案件分析已经完成，可以直接上传证据并生成材料" }, { status: 409 });
   const round = priorAnalysis.round === 1 ? 2 : 1;
   const conversation = Array.isArray(data.conversation) ? [...data.conversation] : [];
   if (round === 2) conversation.push({ role: "user", content: message });
-  const analysis = await requestCaseAnalysis(env, {
-    facts: String(intake.facts || message),
-    claims_text: String(intake.claims_text || "[待分析诉求]"),
+  const pending = {
+    status: "pending",
+    round,
     supplement: round === 2 ? message : "",
+    started_at: new Date().toISOString(),
+  };
+  data.analysis = pending;
+  data.conversation = conversation;
+  await env.DB.prepare("UPDATE cases SET data_json = ?, status = 'analyzing' WHERE id = ? AND user_id = ?")
+    .bind(JSON.stringify(data), caseId, owned.user.id).run();
+  try {
+    await env.GENERATION_QUEUE.send({ type: "case_analysis", version: 1, case_id: caseId, requested_at: new Date().toISOString() });
+  } catch (error) {
+    data.analysis = { ...pending, status: "failed", error: "分析任务入队失败，请重试" };
+    await env.DB.prepare("UPDATE cases SET data_json = ?, status = 'ready_to_generate' WHERE id = ? AND user_id = ?")
+      .bind(JSON.stringify(data), caseId, owned.user.id).run();
+    return json({ detail: `分析任务入队失败：${String(error)}` }, { status: 503 });
+  }
+  return json({ status: "pending", analysis: pending }, { status: 202 });
+}
+
+async function dispatchCaseAnalysis(message: Message<CaseAnalysisMessage>, env: Env): Promise<void> {
+  const caseId = message.body.case_id;
+  const row = await env.DB.prepare(
+    "SELECT id, user_id, title, case_stage, party_side, status, access_status, data_json, generation_count, generation_version, created_at, expires_at FROM cases WHERE id = ?",
+  ).bind(caseId).first<CaseRow>();
+  if (!row) { message.ack(); return; }
+  const data = parseCaseData(row.data_json);
+  const pending = data.analysis && typeof data.analysis === "object" ? data.analysis as Record<string, unknown> : {};
+  if (pending.status !== "pending") { message.ack(); return; }
+  const intake = data.intake && typeof data.intake === "object" ? data.intake as Record<string, unknown> : {};
+  const round = pending.round === 2 ? 2 : 1;
+  const analysis = await requestCaseAnalysis(env, {
+    facts: String(intake.facts || ""),
+    claims_text: String(intake.claims_text || "[待分析诉求]"),
+    supplement: String(pending.supplement || ""),
     current_data: data,
     round,
-  }) ?? fallbackCaseAnalysis(owned.row, data, round, round === 2 ? message : "");
+  }) ?? fallbackCaseAnalysis(row, data, round, String(pending.supplement || ""));
   const patch = analysis.data_patch && typeof analysis.data_patch === "object" && !Array.isArray(analysis.data_patch)
     ? analysis.data_patch as Record<string, unknown> : {};
   const merged = mergeData(data, patch);
@@ -776,18 +816,24 @@ async function chatCase(request: Request, env: Env, caseId: string): Promise<Res
   const reply = round === 1 && questions.length
     ? `分析完成。请一次性补充以下信息：\n${questions.map((item, index) => `${index + 1}. ${item}`).join("\n")}`
     : "补充信息已合并。现在可以上传现有证据并直接生成文书。";
+  const conversation = Array.isArray(merged.conversation) ? [...merged.conversation] : [];
   conversation.push({ role: "assistant", content: reply });
   merged.conversation = conversation;
-  // The user-selected routing fields are authoritative. The analysis model may
-  // describe a conflicting stage or side, but must never reroute the case.
-  const stage = owned.row.case_stage;
-  const side = owned.row.party_side;
-  merged.analysis = { ...analysis, case_stage: stage, party_side: side, round };
-  await env.DB.prepare("UPDATE cases SET data_json = ?, case_stage = ?, party_side = ?, status = ? WHERE id = ? AND user_id = ?")
-    .bind(JSON.stringify(merged), stage, side, round === 1 ? "pending_confirmation" : "ready_to_generate", caseId, owned.user.id).run();
-  const updatedRow = { ...owned.row, data_json: JSON.stringify(merged), case_stage: stage, party_side: side };
-  const assessment = readinessFor(updatedRow, merged);
-  return json({ data: merged, reply, readiness: assessment.readiness, missing_fields: assessment.missing_fields });
+  merged.analysis = { ...analysis, status: "complete", case_stage: row.case_stage, party_side: row.party_side, round };
+  await env.DB.prepare("UPDATE cases SET data_json = ?, status = ? WHERE id = ?")
+    .bind(JSON.stringify(merged), round === 1 ? "pending_confirmation" : "ready_to_generate", caseId).run();
+  message.ack();
+}
+
+async function getCaseAnalysis(request: Request, env: Env, caseId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  const data = parseCaseData(owned.row.data_json);
+  const analysis = data.analysis && typeof data.analysis === "object" ? data.analysis as Record<string, unknown> : null;
+  if (!analysis) return json(null);
+  const pending = analysis.status === "pending";
+  const readiness = readinessFor(owned.row, data);
+  return json({ status: pending ? "pending" : "complete", analysis, data, readiness: readiness.readiness, missing_fields: readiness.missing_fields });
 }
 
 function safeFilename(value: string): string {
@@ -1612,6 +1658,7 @@ export default {
       if (request.method === "DELETE" && !subpath) return deleteCase(request, env, caseId);
       if (request.method === "PATCH" && !subpath) return updateCase(request, env, caseId);
       if (request.method === "POST" && subpath === "chat") return chatCase(request, env, caseId);
+      if (request.method === "GET" && subpath === "analysis") return getCaseAnalysis(request, env, caseId);
       if (request.method === "POST" && subpath === "evidence") return uploadEvidence(request, env, caseId);
       if (request.method === "POST" && subpath === "generate") return generateCase(request, env, caseId);
       if (request.method === "POST" && subpath === "legal-search") return legalSearch(request, env, caseId);
@@ -1665,6 +1712,8 @@ export default {
     for (const message of batch.messages) {
       if (message.body.type === "evidence_analysis") {
         await dispatchEvidenceAnalysis(message as Message<EvidenceAnalysisMessage>, env);
+      } else if (message.body.type === "case_analysis") {
+        await dispatchCaseAnalysis(message as Message<CaseAnalysisMessage>, env);
       } else {
         await dispatchGeneration(message as Message<GenerationMessage>, env);
       }
