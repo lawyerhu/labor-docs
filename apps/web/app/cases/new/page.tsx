@@ -51,8 +51,8 @@ export default function NewCasePage() {
         <label className="field"><span>当前阶段</span><select value={stage} onChange={(event) => setStage(event.target.value as CaseStage)} required><option value="">请选择</option><option value="arbitration">劳动仲裁</option><option value="litigation">仲裁后起诉</option></select></label>
         <label className="field"><span>申请人/原告一方</span><select value={side} onChange={(event) => setSide(event.target.value as PartySide)} required><option value="">请选择</option><option value="worker">劳动者</option><option value="employer">公司/用人单位</option></select></label>
       </div>
-       <label className="field full"><span>案情说明 <small>可不完整</small></span><textarea rows={5} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="例如：公司不服仲裁裁决中的违约金，希望法院调低或判决无需支付。" /></label>
-       <label className="field full"><span>诉请或请求 <small>可不完整</small></span><textarea rows={4} value={claims} onChange={(event) => setClaims(event.target.value)} placeholder="例如：请求调低违约金，或判决无需支付该项费用。" /></label>
+       <label className="field full"><span>案情说明 <small>尽量填写完整</small></span><textarea rows={5} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="例如：请尽量填写入职、离职或解除时间、岗位、工资、争议经过、仲裁结果等事实。" /></label>
+       <label className="field full"><span>诉请或请求 <small>尽量填写完整</small></span><textarea rows={4} value={claims} onChange={(event) => setClaims(event.target.value)} placeholder="例如：请写明具体请求事项、金额、计算期间、计算依据，以及仲裁支持或驳回的部分。" /></label>
        <div className="privacy-note"><FileText size={18} /><span>系统先分析案情、诉请和类案举证风险，再根据你实际提交的材料选择性编排证据目录。</span></div>
       {error && <div className="form-error">{error}</div>}
        <button className="button button-primary button-large" disabled={loading || !stage || !side}>{loading ? "正在分析案情…" : <><Sparkles size={18} /> 分析案情并继续 <ArrowRight size={18} /></>}</button>
