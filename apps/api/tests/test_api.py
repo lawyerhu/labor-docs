@@ -7,7 +7,9 @@ os.environ["LOCAL_STORAGE_DIR"] = "./test-storage"
 
 from fastapi.testclient import TestClient
 
+import app.main as main_module
 from app.main import create_app
+from app.services.legal_research import LegalSnapshot
 
 
 def test_user_can_create_incomplete_case_and_generate_formal_documents():
@@ -96,7 +98,12 @@ def test_upload_rejects_executable_renamed_as_pdf():
         assert response.status_code == 415
 
 
-def test_legal_search_persists_unverified_snapshot_without_fabricating_basis():
+def test_legal_search_persists_unverified_snapshot_without_fabricating_basis(monkeypatch):
+    class UnconfiguredProvider:
+        async def search(self, query):
+            return LegalSnapshot(query, False, "2026-08-14T00:00:00Z", "yuandian:not-configured", {})
+
+    monkeypatch.setattr(main_module, "YuandianLegalResearchProvider", UnconfiguredProvider)
     with TestClient(create_app()) as client:
         code = client.post("/api/auth/request-code", json={"email": "legal@example.com"}).json()["dev_code"]
         client.post("/api/auth/verify", json={"email": "legal@example.com", "code": code})

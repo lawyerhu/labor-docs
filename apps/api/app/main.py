@@ -209,10 +209,11 @@ def create_app() -> FastAPI:
             "deepseek_api_key_env_present": deepseek_env_value is not None,
             "deepseek_api_key_env_nonblank": bool((deepseek_env_value or "").strip()),
             "yuandian_mcp_configured": bool(
-                settings.yuandian_token
+                (settings.yuandian_token or settings.yuandian_api_key)
                 and settings.yuandian_law_mcp_url
                 and settings.yuandian_case_mcp_url
             ),
+            "yuandian_transport": "streamable_http_with_openapi_fallback",
             "openai_fallback_configured": all(
                 (
                     settings.openai_base_url,

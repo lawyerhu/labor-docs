@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     grok_reasoning_effort: str | None = None
     yuandian_endpoint: str | None = None
     yuandian_token: str | None = None
+    yuandian_api_key: str | None = None
     yuandian_law_mcp_url: str = "https://open.chineselaw.com/mcp/law/stream"
     yuandian_case_mcp_url: str = "https://open.chineselaw.com/mcp/case/stream"
     yuandian_company_mcp_url: str = "https://open.chineselaw.com/mcp/company/stream"
