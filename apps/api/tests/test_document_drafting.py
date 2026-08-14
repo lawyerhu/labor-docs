@@ -104,6 +104,89 @@ def test_draft_removes_unbracketed_precise_article_when_not_verified(monkeypatch
     assert "[待核验法律依据]" in result["facts_and_reasons"][0]
 
 
+def test_draft_weaves_grounded_citations_inline_without_legal_basis_label(monkeypatch):
+    async def complete_json(**_kwargs):
+        return {
+            "claims": ["请求判令被告支付二倍工资。"],
+            "facts_and_reasons": [
+                "根据[待核验法律依据]及[待核验法律依据]的规定，用人单位应当支付二倍工资。"
+            ],
+            "data_patch": {},
+            "evidence_items": [],
+            "verified_law": [
+                {"citation": "《中华人民共和国劳动合同法》第八十七条"},
+                {"citation": "《中华人民共和国劳动合同法实施条例》第七条"},
+            ],
+            "missing_fields": [],
+        }
+
+    monkeypatch.setattr(drafting, "complete_json", complete_json)
+    case = {
+        "id": "case-1",
+        "case_stage": "litigation",
+        "party_side": "worker",
+        "data": {
+            "legal_research": {
+                "law": {
+                    "verified": True,
+                    "source": "yuandian:mcp:law",
+                    "retrieved_at": "2026-08-14T00:00:00+00:00",
+                    "content": {
+                        "text": "《中华人民共和国劳动合同法》第八十七条 用人单位违反本法规定解除或者终止劳动合同的，应当依照本法第四十七条规定的经济补偿标准的二倍向劳动者支付赔偿金。 《中华人民共和国劳动合同法实施条例》第七条 用人单位自用工之日起满一年未与劳动者订立书面劳动合同的，自用工之日起满一个月的次日至满一年的前一日应当依照劳动合同法第八十二条的规定向劳动者每月支付两倍的工资。"
+                    },
+                }
+            }
+        },
+    }
+
+    result = asyncio.run(drafting.draft_case_documents(case=case, evidence_items=[], material_texts={}))
+
+    text = "\n".join(result["facts_and_reasons"])
+    assert (
+        "根据《中华人民共和国劳动合同法》第八十七条及《中华人民共和国劳动合同法实施条例》第七条的规定"
+        in text
+    )
+    assert "法律依据：" not in text
+    assert "[待核验法律依据]" not in text
+    assert len(result["facts_and_reasons"]) == 1
+
+
+def test_draft_woven_citation_fills_extra_placeholders_with_last_verified_law(monkeypatch):
+    async def complete_json(**_kwargs):
+        return {
+            "claims": ["请求判令被告支付赔偿金。"],
+            "facts_and_reasons": ["根据[待核验法律依据]及[待核验法律依据]、[待核验法律依据]的规定支付。"],
+            "data_patch": {},
+            "evidence_items": [],
+            "verified_law": [{"citation": "《中华人民共和国劳动合同法》第八十七条"}],
+            "missing_fields": [],
+        }
+
+    monkeypatch.setattr(drafting, "complete_json", complete_json)
+    case = {
+        "id": "case-1",
+        "case_stage": "litigation",
+        "party_side": "worker",
+        "data": {
+            "legal_research": {
+                "law": {
+                    "verified": True,
+                    "source": "yuandian:mcp:law",
+                    "retrieved_at": "2026-08-14T00:00:00+00:00",
+                    "content": {
+                        "text": "《中华人民共和国劳动合同法》第八十七条 用人单位违反本法规定解除或者终止劳动合同的，应当依照本法第四十七条规定的经济补偿标准的二倍向劳动者支付赔偿金。"
+                    },
+                }
+            }
+        },
+    }
+
+    result = asyncio.run(drafting.draft_case_documents(case=case, evidence_items=[], material_texts={}))
+
+    assert "[待核验法律依据]" not in "\n".join(result["facts_and_reasons"])
+    assert "法律依据：" not in "\n".join(result["facts_and_reasons"])
+
+
 def test_draft_returns_logical_evidence_order_and_selection(monkeypatch):
     async def complete_json(**_kwargs):
         result = _model_result()

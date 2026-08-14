@@ -70,6 +70,31 @@ def test_package_survives_string_facts_and_arbitration(tmp_path: Path):
     assert "[待核验法律依据]" in text
 
 
+def test_verified_legal_basis_woven_into_last_fact_paragraph_without_label(tmp_path: Path):
+    data = {
+        "employment_facts": "申请人2023年7月12日入职，任实施工程师。",
+        "legal_basis": [
+            {
+                "citation": "《中华人民共和国劳动合同法》第八十七条",
+                "verified": True,
+                "source": "yuandian:mcp:law",
+            }
+        ],
+    }
+
+    result = build_case_package(
+        case_id="case-basis",
+        payload={"case_stage": "litigation", "party_side": "worker", "data": data},
+        evidence_items=[],
+        output_dir=tmp_path,
+    )
+
+    ordinary = tmp_path / "case-basis" / "01B-民事起诉状（普通式）.docx"
+    text = _all_text(ordinary)
+    assert "根据《中华人民共和国劳动合同法》第八十七条的规定，用人单位应承担相应的法律责任。" in text
+    assert "法律依据：" not in text
+
+
 def test_evidence_package_uses_actual_files_and_continuous_pages(tmp_path: Path):
     source_a = tmp_path / "a.pdf"
     source_b = tmp_path / "b.pdf"

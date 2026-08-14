@@ -102,7 +102,7 @@ async def draft_case_documents(
     parsed = await complete_json(
         system="""你是中国劳动争议诉讼文书撰写律师。根据案件结构化信息和证据正文，撰写可以直接进入正式文书的中文内容，只输出JSON。
 claims：字符串数组，每项是明确、完整的仲裁请求或诉讼请求；案件信息能确定时不得改写成待填模板。确实缺少金额或计算基础时，只在该处用明确的[待填入：...]。
-facts_and_reasons：字符串数组，每项是一段连贯中文正文。按时间顺序叙述劳动关系、争议发生、仲裁经过、起诉理由和法律依据，但不得使用“劳动关系”“争议发生”“仲裁前置”“起诉理由”“法律理由”等小标题或类似分段标题。不得原样堆叠用户口语，不得仅罗列字段，不得虚构材料没有的事实。
+facts_and_reasons：字符串数组，每项是一段连贯中文正文。按时间顺序叙述劳动关系、争议发生、仲裁经过、起诉理由和法律依据，但不得使用“劳动关系”“争议发生”“仲裁前置”“起诉理由”“法律理由”等小标题或类似分段标题。法律依据必须用法言法语穿插在叙述中，例如“根据《中华人民共和国劳动合同法》第八十七条的规定，用人单位应当……”，不得在末尾单独罗列“法律依据：……”或同类清单。不得原样堆叠用户口语，不得仅罗列字段，不得虚构材料没有的事实。
 data_patch：从案件说明及材料中能够可靠提取的结构化信息。仅返回有依据的字段，未知字段直接省略，不得猜测。可包含：
 - parties.initiating / parties.opposing：type(company/individual)、name、address、credit_code、legal_representative、legal_representative_title、gender、birth_date、id_number、contact；
 - court：管辖法院全称；只有企业信息或案件材料足以支持时填写；
@@ -112,7 +112,7 @@ data_patch：从案件说明及材料中能够可靠提取的结构化信息。�
 - evidence_gaps、evidence_requirements：从请求权和类案中整理的可选证据建议；不要把未提交建议写成已存在的证据。
 当材料与用户已确认信息冲突时，不覆盖原值，并在 missing_fields 中写明[待核实：具体冲突]。
 evidence_items：逐项返回 id、name、purpose、include、order。name按材料内容命名，不得使用上传文件名；purpose必须结合诉请写出该证据证明的具体事实。include=false 仅用于与本案请求权和事实无关、重复或无法形成证明作用的材料；有用材料必须为 true。order 是证据在目录和证据合并PDF中的逻辑顺序，不得按上传顺序填写，应按“劳动关系/基础事实→工资考勤及履行→争议发生或解除→仲裁经过及送达→其他补强”的证明链，并结合本案请求权和事实时间线确定。不要返回来源字段。
-verified_law：对象数组，每项只包含 citation。只能使用输入 legal_research.law 中已标记 verified=true 且 citation 原文能从其 content 核对的法条。无法核验时返回空数组，不写具体条号，并在事实理由末尾使用[待核验法律依据]。
+verified_law：对象数组，每项只包含 citation。只能使用输入 legal_research.law 中已标记 verified=true 且 citation 原文能从其 content 核对的法条；无法核验时返回空数组，并在正文相应位置使用[待核验法律依据]，不得在末尾单独罗列。
 missing_fields：仅列影响提交或诉请计算且无法从材料得出的关键信息。不要为可由正文自然表述的信息制造占位符。
 语气专业克制，避免“保证胜诉”等结论。""",
         user=json.dumps({"case": compact_case_for_draft(case), "evidence": evidence}, ensure_ascii=False),
@@ -134,12 +134,28 @@ missing_fields：仅列影响提交或诉请计算且无法从材料得出的关
         for value in parsed.get("facts_and_reasons") or []
         if str(value).strip()
     ]
-    combined_facts = "\n".join(facts)
     if legal_basis:
-        missing_citations = [item["citation"] for item in legal_basis if item["citation"] not in combined_facts]
-        if missing_citations:
-            facts.append(f"法律依据：{'；'.join(missing_citations)}。")
-    elif "[待核验法律依据]" not in combined_facts:
+        tokens = [item["citation"] for item in legal_basis]
+        if "[待核验法律依据]" in "\n".join(facts):
+            index = 0
+
+            def _fill(_match: re.Match[str]) -> str:
+                nonlocal index
+                token = tokens[min(index, len(tokens) - 1)]
+                index += 1
+                return token
+
+            facts = re.sub(r"\[待核验法律依据\]", _fill, "\n".join(facts)).split("\n")
+        missing = [
+            item["citation"]
+            for item in legal_basis
+            if item["citation"] not in "\n".join(facts)
+        ]
+        if missing and facts:
+            facts[-1] = (
+                f"{facts[-1]} 根据{'、'.join(missing)}的规定，用人单位应承担相应的法律责任。"
+            )
+    elif "[待核验法律依据]" not in "\n".join(facts):
         facts.append("[待核验法律依据]")
     updates = []
     known_ids = {item["id"] for item in evidence_items}

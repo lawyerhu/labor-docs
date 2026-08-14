@@ -223,7 +223,10 @@ def _fact_text(data: dict[str, Any], stage: str) -> list[str]:
     facts.extend(f"[待核实：{item}]" for item in conflicts)
     basis = data.get("legal_basis") or []
     legal = [item.get("citation") for item in basis if isinstance(item, dict) and item.get("verified")]
-    facts.append("法律依据：" + "；".join(legal) if legal else "[待核验法律依据]")
+    if legal and facts:
+        facts[-1] = f"{facts[-1]} 根据{'、'.join(legal)}的规定，用人单位应承担相应的法律责任。"
+    elif facts:
+        facts[-1] = f"{facts[-1]} [待核验法律依据]"
     return facts
 
 
