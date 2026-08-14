@@ -42,6 +42,58 @@ def test_litigation_package_with_missing_facts_contains_placeholders(tmp_path: P
     assert catalog.sections[0].page_width > catalog.sections[0].page_height
 
 
+def test_split_evidence_extracts_only_referenced_pages_in_catalog_order(tmp_path: Path):
+    bundle = tmp_path / "bundle.pdf"
+    _make_pdf(bundle, "bundle", 5)
+    evidence_items = [
+        {
+            "id": "bundle",
+            "original_name": "材料合集.pdf",
+            "name": "微信支付明细",
+            "purpose": "证明工资标准。",
+            "stored_path": str(bundle),
+            "_package_order": 2,
+            "_page_range": [3, 3],
+        },
+        {
+            "id": "bundle",
+            "original_name": "材料合集.pdf",
+            "name": "劳动合同",
+            "purpose": "证明劳动关系。",
+            "stored_path": str(bundle),
+            "_package_order": 1,
+            "_page_range": [1, 2],
+        },
+        {
+            "id": "single",
+            "original_name": "单独材料.pdf",
+            "name": "离职通知",
+            "purpose": "证明解除事实。",
+            "stored_path": str(tmp_path / "single.pdf"),
+            "_package_order": 3,
+        },
+    ]
+    _make_pdf(tmp_path / "single.pdf", "single", 1)
+
+    result = build_case_package(
+        case_id="case-split",
+        payload={"case_stage": "litigation", "party_side": "worker", "data": {}},
+        evidence_items=evidence_items,
+        output_dir=tmp_path,
+    )
+
+    evidence = tmp_path / "case-split" / "03-证据材料.pdf"
+    reader = PdfReader(evidence)
+    assert len(reader.pages) == 4
+    assert [item.title for item in reader.outline] == ["证据1：劳动合同", "证据2：微信支付明细", "证据3：离职通知"]
+    catalog = Document(tmp_path / "case-split" / "02-证据目录.docx")
+    rows = catalog.tables[0].rows
+    assert [cell.text for cell in rows[1].cells] == ["1", "劳动合同", "证明劳动关系。", "1—2"]
+    assert [cell.text for cell in rows[2].cells] == ["2", "微信支付明细", "证明工资标准。", "3"]
+    assert [cell.text for cell in rows[3].cells] == ["3", "离职通知", "证明解除事实。", "4"]
+    assert result.readiness == "formal_with_placeholders"
+
+
 def test_package_survives_string_facts_and_arbitration(tmp_path: Path):
     data = {
         "employment_facts": "申请人2023年7月12日入职，任实施工程师。",

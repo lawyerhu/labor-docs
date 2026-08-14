@@ -465,24 +465,35 @@ def _footer_overlay(width: float, height: float, page: int, total: int) -> Any:
 def _assemble_evidence(evidence: list[dict[str, Any]], path: Path) -> list[str]:
     with tempfile.TemporaryDirectory(prefix="labor-docs-") as temporary:
         temp_dir = Path(temporary)
-        sources: list[tuple[dict[str, Any], PdfReader]] = []
+        converted: dict[Path, Path] = {}
+        sources: list[tuple[dict[str, Any], PdfReader, int, int]] = []
         for item in evidence:
-            source = _source_pdf(Path(item["stored_path"]), temp_dir)
-            sources.append((item, PdfReader(source)))
-        total = sum(len(reader.pages) for _, reader in sources)
+            stored_path = Path(item["stored_path"])
+            if stored_path not in converted:
+                converted[stored_path] = _source_pdf(stored_path, temp_dir)
+            reader = PdfReader(converted[stored_path])
+            start, end = 1, len(reader.pages)
+            page_range = item.get("_page_range")
+            if isinstance(page_range, (list, tuple)) and len(page_range) == 2:
+                lo, hi = int(page_range[0]), int(page_range[1])
+                start = max(1, min(lo, end))
+                end = min(end, max(start, hi))
+            sources.append((item, reader, start, end))
+        total = sum(end - start + 1 for _, _, start, end in sources)
         writer = PdfWriter()
         page_ranges: list[str] = []
         current = 1
         bookmark_starts: list[tuple[str, int]] = []
-        for index, (item, reader) in enumerate(sources, start=1):
-            start = current
+        for index, (item, reader, start, end) in enumerate(sources, start=1):
             bookmark_starts.append((f"证据{index}：{item.get('name') or item.get('original_name')}", len(writer.pages)))
-            for source_page in reader.pages:
+            for page_index in range(start - 1, end):
+                source_page = reader.pages[page_index]
                 source_page.merge_page(_footer_overlay(float(source_page.mediabox.width), float(source_page.mediabox.height), current, total))
                 writer.add_page(source_page)
                 current += 1
-            end = current - 1
-            page_ranges.append(str(start) if start == end else f"{start}—{end}")
+            last = current - 1
+            first = last - (end - start)
+            page_ranges.append(str(first) if first == last else f"{first}—{last}")
         for title, page_index in bookmark_starts:
             writer.add_outline_item(title, page_index)
         writer.add_metadata({"/Title": "证据材料", "/Author": ""})

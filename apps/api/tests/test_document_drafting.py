@@ -187,6 +187,80 @@ def test_draft_woven_citation_fills_extra_placeholders_with_last_verified_law(mo
     assert "法律依据：" not in "\n".join(result["facts_and_reasons"])
 
 
+def test_draft_splits_multi_evidence_material_into_separate_catalog_entries(monkeypatch):
+    async def complete_json(**_kwargs):
+        return {
+            "claims": ["请求判令被告支付二倍工资。"],
+            "facts_and_reasons": ["原告与被告存在劳动关系。"],
+            "data_patch": {},
+            "evidence_items": [
+                {"id": "bundle", "name": "劳动合同", "purpose": "证明劳动关系。", "include": True, "order": 1, "pages": "1-2"},
+                {"id": "bundle", "name": "微信支付明细", "purpose": "证明工资标准。", "include": True, "order": 2, "pages": "第3页"},
+                {"id": "bundle", "name": "离职通知", "purpose": "证明解除事实。", "include": True, "order": 3, "pages": "4-5"},
+                {"id": "other", "name": "仲裁裁决", "purpose": "证明仲裁前置。", "include": True, "order": 4, "pages": "1"},
+            ],
+            "verified_law": [],
+            "missing_fields": [],
+        }
+
+    monkeypatch.setattr(drafting, "complete_json", complete_json)
+    case = {
+        "id": "case-1",
+        "case_stage": "litigation",
+        "party_side": "worker",
+        "data": {},
+    }
+    result = asyncio.run(
+        drafting.draft_case_documents(
+            case=case,
+            evidence_items=[
+                {"id": "bundle", "name": "材料A", "purpose": "", "original_name": "a.pdf"},
+                {"id": "other", "name": "材料B", "purpose": "", "original_name": "b.pdf"},
+            ],
+            material_texts={"bundle": "--- 第1页 ---\n劳动合同\n\n--- 第2页 ---\n工资表", "other": "裁决书"},
+        )
+    )
+
+    updates = result["evidence_updates"]
+    bundle = [update for update in updates if update["id"] == "bundle"]
+    other = [update for update in updates if update["id"] == "other"]
+    assert len(bundle) == 3
+    assert [update["page_range"] for update in bundle] == [[1, 2], [3, 3], [4, 5]]
+    assert [update["split_index"] for update in bundle] == [0, 1, 2]
+    assert [update["name"] for update in bundle] == ["劳动合同", "微信支付明细", "离职通知"]
+    assert [update["order"] for update in bundle] == [1, 2, 3]
+    assert other[0]["page_range"] == [1, 1]
+
+
+def test_draft_ignores_unparsable_pages_without_dropping_evidence(monkeypatch):
+    async def complete_json(**_kwargs):
+        return {
+            "claims": ["请求判令被告支付赔偿金。"],
+            "facts_and_reasons": ["原告与被告存在劳动关系。"],
+            "data_patch": {},
+            "evidence_items": [
+                {"id": "bundle", "name": "劳动合同", "purpose": "证明劳动关系。", "include": True, "order": 1, "pages": "看不清"},
+                {"id": "bundle", "name": "离职通知", "purpose": "证明解除事实。", "include": True, "order": 2, "pages": "2-1"},
+            ],
+            "verified_law": [],
+            "missing_fields": [],
+        }
+
+    monkeypatch.setattr(drafting, "complete_json", complete_json)
+    case = {"id": "case-1", "case_stage": "litigation", "party_side": "worker", "data": {}}
+    result = asyncio.run(
+        drafting.draft_case_documents(
+            case=case,
+            evidence_items=[{"id": "bundle", "name": "材料A", "purpose": "", "original_name": "a.pdf"}],
+            material_texts={"bundle": "--- 第1页 ---\n劳动合同"},
+        )
+    )
+
+    updates = result["evidence_updates"]
+    assert [update["page_range"] for update in updates] == [None, None]
+    assert len(updates) == 2
+
+
 def test_draft_returns_logical_evidence_order_and_selection(monkeypatch):
     async def complete_json(**_kwargs):
         result = _model_result()

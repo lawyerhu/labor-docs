@@ -29,6 +29,31 @@ _PRECISE_LAW_CITATION = re.compile(
     r"|第[〇零一二三四五六七八九十百千万两0-9]+条(?:之[〇零一二三四五六七八九十百千万两0-9]+)?"
 )
 
+_PAGE_RANGE_RE = re.compile(r"(\d{1,4})\s*(?:[-—–~至到])\s*(\d{1,4})")
+_SINGLE_PAGE_RE = re.compile(r"(\d{1,4})")
+
+
+def _parse_page_range(raw: Any) -> list[int] | None:
+    if isinstance(raw, (list, tuple)) and len(raw) == 2:
+        lo, hi = int(raw[0]), int(raw[1])
+        if lo >= 1 and hi >= lo:
+            return [lo, hi]
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    match = _PAGE_RANGE_RE.search(text)
+    if match:
+        lo, hi = int(match.group(1)), int(match.group(2))
+        if lo >= 1 and hi >= lo:
+            return [lo, hi]
+        return None
+    single = _SINGLE_PAGE_RE.search(text)
+    if single:
+        page = int(single.group(1))
+        if page >= 1:
+            return [page, page]
+    return None
+
 
 def _compact_research(value: Any, limit: int) -> Any:
     if not isinstance(value, dict):
@@ -111,7 +136,7 @@ data_patch：从案件说明及材料中能够可靠提取的结构化信息。�
 - arbitration：committee、award_number、result、service_date、payment_status。
 - evidence_gaps、evidence_requirements：从请求权和类案中整理的可选证据建议；不要把未提交建议写成已存在的证据。
 当材料与用户已确认信息冲突时，不覆盖原值，并在 missing_fields 中写明[待核实：具体冲突]。
-evidence_items：逐项返回 id、name、purpose、include、order。name按材料内容命名，不得使用上传文件名；purpose必须结合诉请写出该证据证明的具体事实。include=false 仅用于与本案请求权和事实无关、重复或无法形成证明作用的材料；有用材料必须为 true。order 是证据在目录和证据合并PDF中的逻辑顺序，不得按上传顺序填写，应按“劳动关系/基础事实→工资考勤及履行→争议发生或解除→仲裁经过及送达→其他补强”的证明链，并结合本案请求权和事实时间线确定。不要返回来源字段。
+evidence_items：逐项返回 id、name、purpose、include、order。id 必须来自输入材料。当一份材料（正文中的“--- 第N页 ---”分段）确实包含多项相互独立的证据时（例如同一扫描件里既有劳动合同，又有工资流水和解除通知），可对同一 id 返回多项，每项代表一份独立证据，并给出 pages（该项在原文件中的页码范围，如"1-3"或"第1-2页"；单页如"第3页"；不拆分时省略 pages）。单一证据或无法判断页码范围时不要拆。name按材料内容命名，不得使用上传文件名；purpose必须结合诉请写出该证据证明的具体事实。include=false 仅用于与本案请求权和事实无关、重复或无法形成证明作用的材料；有用材料必须为 true。order 是证据在目录和证据合并PDF中的逻辑顺序，不得按上传顺序填写，应按“劳动关系/基础事实→工资考勤及履行→争议发生或解除→仲裁经过及送达→其他补强”的证明链，并结合本案请求权和事实时间线确定。不要返回来源字段。
 verified_law：对象数组，每项只包含 citation。只能使用输入 legal_research.law 中已标记 verified=true 且 citation 原文能从其 content 核对的法条；无法核验时返回空数组，并在正文相应位置使用[待核验法律依据]，不得在末尾单独罗列。
 missing_fields：仅列影响提交或诉请计算且无法从材料得出的关键信息。不要为可由正文自然表述的信息制造占位符。
 语气专业克制，避免“保证胜诉”等结论。""",
@@ -160,10 +185,14 @@ missing_fields：仅列影响提交或诉请计算且无法从材料得出的关
     updates = []
     known_ids = {item["id"] for item in evidence_items}
     known_items = {item["id"]: item for item in evidence_items}
+    split_counts: dict[str, int] = {}
     for item in parsed.get("evidence_items") or []:
         if not isinstance(item, dict) or item.get("id") not in known_ids:
             continue
-        original = known_items[item["id"]]
+        evidence_id = str(item["id"])
+        original = known_items[evidence_id]
+        split_index = split_counts.get(evidence_id, 0)
+        split_counts[evidence_id] = split_index + 1
         name = str(item.get("name") or original.get("name") or original.get("original_name") or "材料").strip()
         purpose = str(item.get("purpose") or original.get("purpose") or "[待核实：证明目的]").strip()
         order_value = item.get("order")
@@ -173,11 +202,13 @@ missing_fields：仅列影响提交或诉请计算且无法从材料得出的关
             order = None
         updates.append(
             {
-                "id": item["id"],
+                "id": evidence_id,
+                "split_index": split_index,
                 "name": name[:255],
                 "purpose": purpose[:2000],
                 "included": item.get("include") is not False and str(item.get("include") or "").lower() != "false",
                 "order": order,
+                "page_range": _parse_page_range(item.get("pages")),
             }
         )
     if not claims or not facts:

@@ -402,6 +402,28 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
             selected_evidence = evidence_items
             for item in evidence_items:
                 item["_include_in_package"] = True
+        split_groups: dict[str, list[dict[str, Any]]] = {}
+        for update in draft["evidence_updates"]:
+            split_groups.setdefault(str(update.get("id") or ""), []).append(update)
+        expanded_evidence: list[dict[str, Any]] = []
+        for item in selected_evidence:
+            group = split_groups.get(str(item["id"])) or []
+            if len(group) > 1:
+                for split in group:
+                    if split.get("included") is False:
+                        continue
+                    expanded_evidence.append(
+                        {
+                            **item,
+                            "name": str(split.get("name") or item["name"]),
+                            "purpose": str(split.get("purpose") or ""),
+                            "_package_order": split.get("order"),
+                            "_page_range": split.get("page_range"),
+                        }
+                    )
+            else:
+                expanded_evidence.append(item)
+        selected_evidence = expanded_evidence
         data = _merge_known_values(dict(case.get("data") or {}), draft["data_patch"])
         data["legal_research"] = legal_research
         data["legal_basis"] = draft["legal_basis"]
@@ -444,18 +466,36 @@ async def run_remote_generation(worker_payload: dict[str, Any], job_id: str) -> 
             delete_if_managed(str(processing_path))
 
     evidence_updates = []
+    update_groups: dict[str, list[dict[str, Any]]] = {}
     for update in draft["evidence_updates"]:
-        evidence_id = str(update.get("id") or "")
+        update_groups.setdefault(str(update.get("id") or ""), []).append(update)
+    for evidence_id, group in update_groups.items():
         original = next((item for item in evidence_items if item["id"] == evidence_id), None)
         analysis = dict(original.get("analysis") or {}) if original else {}
         if evidence_id in material_texts:
             analysis["extracted_text"] = material_texts[evidence_id]
             analysis["extraction_version"] = 2
-        selected_for_package = original.get("_include_in_package", update.get("included", True)) if original else update.get("included", True)
+        first = group[0]
+        selected_for_package = (
+            original.get("_include_in_package", first.get("included", True))
+            if original
+            else first.get("included", True)
+        )
         analysis["selected_for_package"] = selected_for_package
-        if update.get("order") is not None:
-            analysis["package_order"] = update["order"]
-        evidence_updates.append({**update, "included": selected_for_package, "analysis": analysis})
+        if first.get("order") is not None:
+            analysis["package_order"] = first["order"]
+        if len(group) > 1:
+            analysis["splits"] = [
+                {
+                    "name": str(split.get("name") or ""),
+                    "purpose": str(split.get("purpose") or ""),
+                    "included": split.get("included", True),
+                    "order": split.get("order"),
+                    "page_range": split.get("page_range"),
+                }
+                for split in group
+            ]
+        evidence_updates.append({**first, "included": selected_for_package, "analysis": analysis})
 
     data_patch = dict(draft["data_patch"])
     data_patch["legal_basis"] = draft["legal_basis"]
