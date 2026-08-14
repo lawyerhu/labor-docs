@@ -4,11 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import asyncio
 import json
+import re
 from typing import Any
 
 import httpx
 
 from app.config import get_settings
+from app.services.openai_compat import complete_json
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,61 @@ def unavailable_snapshot(category: str, query: str, error: Exception | None = No
         f"yuandian:{category}:unavailable",
         detail,
     )
+
+
+def _regex_company_name(text: str) -> str | None:
+    """提取公司全称的正则兜底：优先取“被申请人/用人单位/被告/申请人”之后的公司名。"""
+    pattern = r"([\u4e00-\u9fffA-Za-z0-9（）()]{2,40}?(?:有限责任公司|股份有限公司|有限公司))"
+    for marker in ("被申请人", "用人单位", "被告", "申请人"):
+        position = text.rfind(marker)
+        if position < 0:
+            continue
+        match = re.match(pattern, text[position + len(marker):])
+        if match:
+            return match.group(1)[:100]
+    match = re.search(pattern, text)
+    return match.group(1)[:100] if match else None
+
+
+async def extract_company_name(
+    facts: str,
+    claims: str,
+    current_data: dict[str, Any] | None = None,
+) -> str | None:
+    """让大模型从案情中理解用人单位公司名称；解析失败时回退到正则提取。
+
+    已确认的 parties 优先（无需再调用大模型）；其次用大模型理解案情；
+    大模型不可用或未给出公司名时用正则兜底。
+    """
+    if isinstance(current_data, dict):
+        parties = current_data.get("parties")
+        if isinstance(parties, dict):
+            for party in parties.values():
+                if not isinstance(party, dict):
+                    continue
+                name = str(party.get("name") or "").strip()
+                party_type = str(party.get("type") or "").strip().lower()
+                if name and (party_type == "company" or party.get("credit_code") or name.endswith(("公司", "事务所", "中心"))):
+                    return name[:100]
+    combined = "\n".join(part for part in (facts, claims) if part)[:2000]
+    if not combined:
+        return None
+    try:
+        parsed = await complete_json(
+            system=(
+                "你是劳动争议文书助手。请从案情中找出用人单位（被申请人/被告/用人单位一方）的准确公司全称。"
+                '只输出JSON：{"company_name": "公司全称"}。若案情中没有公司主体或无法确定公司名称，company_name 输出 null。'
+                "不要编造，不要输出其他内容。"
+            ),
+            user=json.dumps({"case": combined}, ensure_ascii=False),
+            timeout=20,
+        )
+        name = str(parsed.get("company_name") or "").strip()
+        if name and name.lower() != "null":
+            return name[:100]
+    except Exception:
+        pass
+    return _regex_company_name(combined)
 
 
 async def safe_research(provider: Any, category: str, query: str) -> LegalSnapshot:
@@ -232,7 +289,13 @@ class YuandianLegalResearchProvider:
                             "items": [item.model_dump(mode="json") for item in result.content],
                             "is_error": bool(result.isError),
                         }
-                        snapshot = LegalSnapshot(query, not result.isError, now, f"yuandian:mcp:{category}", content)
+                        snapshot = LegalSnapshot(
+                            query,
+                            not result.isError and self._mcp_has_results(content),
+                            now,
+                            f"yuandian:mcp:{category}",
+                            content,
+                        )
                         if category != "company" and snapshot.verified:
                             return snapshot
                         direct = await self._openapi_search(category, query, token)
@@ -296,24 +359,47 @@ class YuandianLegalResearchProvider:
                     if not self._openapi_success(response, search):
                         return LegalSnapshot(query, False, now, "yuandian:openapi:company:unavailable", {"http_status": response.status_code})
                     candidates = search.get("data") if isinstance(search, dict) else None
+                    if not isinstance(candidates, list) or not candidates:
+                        return LegalSnapshot(
+                            query,
+                            False,
+                            now,
+                            "yuandian:openapi:company:no-result",
+                            {"search": search, "base_info": {}},
+                        )
                     candidate = next(
                         (
-                            item for item in (candidates or [])
+                            item for item in candidates
                             if isinstance(item, dict) and str(item.get("企业名称") or "").strip() == query.strip()
                         ),
-                        next((item for item in (candidates or []) if isinstance(item, dict)), None),
+                        None,
                     )
-                    company_id = str(candidate.get("id") or "").strip() if isinstance(candidate, dict) else ""
-                    base_info: dict[str, Any] = {}
-                    if company_id:
-                        detail_response = await client.get(
-                            "https://open.chineselaw.com/open/rh_enterpriseBaseInfo",
-                            headers=headers,
-                            params={"id": company_id},
+                    if candidate is None:
+                        return LegalSnapshot(
+                            query,
+                            False,
+                            now,
+                            "yuandian:openapi:company:no-match",
+                            {"search": search, "base_info": {}},
                         )
-                        detail_body = detail_response.json()
-                        if self._openapi_success(detail_response, detail_body):
-                            base_info = detail_body
+                    company_id = str(candidate.get("id") or "").strip()
+                    if not company_id:
+                        return LegalSnapshot(
+                            query,
+                            False,
+                            now,
+                            "yuandian:openapi:company:no-match",
+                            {"search": search, "base_info": {}},
+                        )
+                    base_info: dict[str, Any] = {}
+                    detail_response = await client.get(
+                        "https://open.chineselaw.com/open/rh_enterpriseBaseInfo",
+                        headers=headers,
+                        params={"id": company_id},
+                    )
+                    detail_body = detail_response.json()
+                    if self._openapi_success(detail_response, detail_body):
+                        base_info = detail_body
                     return LegalSnapshot(
                         query,
                         True,
@@ -323,7 +409,7 @@ class YuandianLegalResearchProvider:
                     )
                 else:
                     return LegalSnapshot(query, False, now, f"yuandian:openapi:{category}:unsupported", {})
-            verified = self._openapi_success(response, content)
+            verified = self._openapi_success(response, content) and self._openapi_has_results(content)
             business_code = content.get("code") if isinstance(content, dict) else None
             auth_failed = response.status_code == 401 or business_code == 401
             source = (
@@ -348,6 +434,50 @@ class YuandianLegalResearchProvider:
             return False
         code = content.get("code")
         return code in {200, 201} and content.get("status") not in {"failed", "error"}
+
+    @staticmethod
+    def _openapi_has_results(content: dict[str, Any]) -> bool:
+        """业务成功但返回空数据不能算已核验来源。"""
+        data = content.get("data")
+        if isinstance(data, list):
+            return len(data) > 0
+        if isinstance(data, dict):
+            return bool(data)
+        return True
+
+    @staticmethod
+    def _mcp_has_results(content: dict[str, Any]) -> bool:
+        """MCP 返回“未查询到相关数据”等空结果时不算已核验来源。"""
+        empty_markers = ("未查询到相关数据", "未查询到", "没有查询到", "暂无相关", "无相关数据", "没有找到", "未找到")
+        for item in content.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            lowered = text.lower()
+            if any(marker in text for marker in empty_markers) or any(
+                marker in lowered for marker in ("no data", "no result", "not found", "empty result")
+            ):
+                return False
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                return True
+            if isinstance(parsed, dict):
+                code = parsed.get("code")
+                if code in (200, 201):
+                    data = parsed.get("data")
+                    if isinstance(data, list):
+                        return len(data) > 0
+                    if isinstance(data, dict):
+                        return bool(data)
+                    if data is None and "data" in parsed:
+                        return False
+                return True
+            if isinstance(parsed, list):
+                return len(parsed) > 0
+        return True
 
     async def _legacy_search(self, query: str) -> LegalSnapshot:
         settings = get_settings()

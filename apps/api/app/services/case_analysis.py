@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from typing import Any
 
 from app.services.legal_research import (
     YuandianLegalResearchProvider,
+    extract_company_name,
     grounded_legal_basis,
     safe_research,
     unavailable_snapshot,
@@ -23,20 +23,6 @@ def _route(text: str) -> tuple[str, str]:
     employer_words = ("我司", "本公司", "代表公司", "公司起诉", "用人单位")
     side = "employer" if any(word in text for word in employer_words) else "worker"
     return stage, side
-
-
-def _company_name(text: str, current_data: dict[str, Any] | None = None) -> str | None:
-    parties = current_data.get("parties") if isinstance(current_data, dict) else None
-    if isinstance(parties, dict):
-        for party in parties.values():
-            if not isinstance(party, dict):
-                continue
-            name = str(party.get("name") or "").strip()
-            party_type = str(party.get("type") or "").strip().lower()
-            if name and (party_type == "company" or name.endswith(("公司", "事务所", "中心"))):
-                return name[:100]
-    match = re.search(r"([\u4e00-\u9fffA-Za-z0-9（）()]{1,40}(?:有限责任公司|股份有限公司|有限公司))", text)
-    return match.group(1) if match else None
 
 
 def _normalise_evidence_requirements(value: Any) -> list[dict[str, str]]:
@@ -224,7 +210,7 @@ legal_analysis 输出一段简明中文，说明请求权、管辖线索、类�
     async def _research(self, facts: str, claims: str, current_data: dict[str, Any]) -> dict[str, Any]:
         provider = YuandianLegalResearchProvider()
         query = f"劳动争议：{claims[:300]}"
-        company = _company_name(facts, current_data)
+        company = await extract_company_name(facts, claims, current_data)
         tasks = [
             safe_research(provider, "law", query),
             safe_research(provider, "case", f"{facts[:300]}；争议请求：{claims[:200]}"),

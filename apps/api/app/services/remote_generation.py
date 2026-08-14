@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Any
@@ -17,6 +16,7 @@ from app.services.generation import _cleanup_generated_case
 from app.services.legal_research import (
     LegalSnapshot,
     YuandianLegalResearchProvider,
+    extract_company_name,
     safe_research,
     verified_company_jurisdiction,
 )
@@ -166,7 +166,7 @@ def _merge_known_values(current: dict[str, Any], patch: dict[str, Any]) -> dict[
     return merged
 
 
-def _generation_research_terms(case: dict[str, Any]) -> tuple[str, str | None]:
+def _generation_research_terms(case: dict[str, Any]) -> str:
     data = case.get("data") if isinstance(case.get("data"), dict) else {}
     claims = data.get("claims") if isinstance(data.get("claims"), list) else []
     claim_terms = []
@@ -179,22 +179,24 @@ def _generation_research_terms(case: dict[str, Any]) -> tuple[str, str | None]:
     stage = "仲裁后起诉" if case.get("case_stage") == "litigation" else "劳动仲裁"
     side = "用人单位" if case.get("party_side") == "employer" else "劳动者"
     query = f"劳动争议 {stage} {side} {'；'.join(claim_terms) or '请求权基础、举证责任及处理规则'}"
+    return query[:500]
 
+
+async def _generation_company_name(case: dict[str, Any]) -> str | None:
+    data = case.get("data") if isinstance(case.get("data"), dict) else {}
     parties = data.get("parties") if isinstance(data.get("parties"), dict) else {}
-    company_name = None
     for role in ("initiating", "opposing"):
         party = parties.get(role) if isinstance(parties.get(role), dict) else {}
         name = str(party.get("name") or "").strip()
         if name and (party.get("type") == "company" or party.get("credit_code") or name.endswith(("公司", "事务所", "中心"))):
-            company_name = name[:100]
-            break
-    if not company_name:
-        intake = data.get("intake") if isinstance(data.get("intake"), dict) else {}
-        company_text = str(intake.get("facts") or "")
-        match = re.search(r"([\u4e00-\u9fffA-Za-z0-9（）()]{1,40}(?:有限责任公司|股份有限公司|有限公司))", company_text)
-        if match:
-            company_name = match.group(1)
-    return query[:500], company_name
+            return name[:100]
+    intake = data.get("intake") if isinstance(data.get("intake"), dict) else {}
+    facts = str(intake.get("facts") or "")
+    claims = data.get("claims") if isinstance(data.get("claims"), list) else []
+    claim_text = "；".join(
+        str(item.get("title") or "")[:120] for item in claims[:8] if isinstance(item, dict) and item.get("title")
+    )
+    return await extract_company_name(facts, claim_text, None)
 
 
 async def research_for_generation(
@@ -205,7 +207,8 @@ async def research_for_generation(
 ) -> dict[str, Any]:
     del material_texts  # 法律检索不发送证据正文或个人信息。
     search = provider or YuandianLegalResearchProvider()
-    query, company_name = _generation_research_terms(case)
+    query = _generation_research_terms(case)
+    company_name = await _generation_company_name(case)
     tasks = [
         safe_research(search, "law", query),
         safe_research(search, "case", f"{query} 类案裁判规则 举证责任"),

@@ -165,3 +165,119 @@ def test_openapi_http_200_business_401_is_not_verified(monkeypatch):
     assert snapshot.verified is False
     assert snapshot.source == "yuandian:openapi:law:auth-failed"
     assert snapshot.content == {"http_status": 200}
+
+
+def test_openapi_company_empty_result_is_not_verified(monkeypatch):
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            return httpx.Response(200, json={"code": 200, "status": "success", "message": "未查询到相关数据"})
+
+    monkeypatch.setattr(legal_research.httpx, "AsyncClient", lambda **_kwargs: Client())
+
+    snapshot = asyncio.run(legal_research.YuandianLegalResearchProvider()._openapi_search("company", "甲有限公司", "api-key"))
+
+    assert snapshot.verified is False
+    assert snapshot.source == "yuandian:openapi:company:no-result"
+
+
+def test_openapi_company_fuzzy_only_match_is_not_verified(monkeypatch):
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            return httpx.Response(
+                200,
+                json={"code": 200, "status": "success", "data": [{"id": "other", "企业名称": "乙有限公司"}]},
+            )
+
+    monkeypatch.setattr(legal_research.httpx, "AsyncClient", lambda **_kwargs: Client())
+
+    snapshot = asyncio.run(legal_research.YuandianLegalResearchProvider()._openapi_search("company", "甲有限公司", "api-key"))
+
+    assert snapshot.verified is False
+    assert snapshot.source == "yuandian:openapi:company:no-match"
+
+
+def test_mcp_empty_result_marker_is_not_verified():
+    content = {
+        "tool": "yuandian_rh_enterpriseSearch",
+        "items": [{"type": "text", "text": '{"status":"success","message":"未查询到相关数据","code":200}'}],
+        "is_error": False,
+    }
+
+    assert legal_research.YuandianLegalResearchProvider._mcp_has_results(content) is False
+
+
+def test_mcp_result_text_is_verified():
+    content = {
+        "tool": "yuandian_law_vector_search",
+        "items": [{"type": "text", "text": "劳动合同法第四十七条 经济补偿按劳动者在本单位工作的年限计算"}],
+        "is_error": False,
+    }
+
+    assert legal_research.YuandianLegalResearchProvider._mcp_has_results(content) is True
+
+
+def test_company_name_extraction_uses_llm_understanding(monkeypatch):
+    calls = []
+
+    async def complete_json(**_kwargs):
+        calls.append(_kwargs["user"])
+        return {"company_name": "江西省欧睿康科技有限公司"}
+
+    monkeypatch.setattr(legal_research, "complete_json", complete_json)
+
+    name = asyncio.run(
+        legal_research.extract_company_name(
+            "申请人于2023年7月12日入职被申请人江西省欧睿康科技有限公司",
+            "请求支付经济补偿",
+            None,
+        )
+    )
+
+    assert name == "江西省欧睿康科技有限公司"
+    assert calls
+
+
+def test_company_name_extraction_falls_back_to_regex_without_llm(monkeypatch):
+    async def complete_json(**_kwargs):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(legal_research, "complete_json", complete_json)
+
+    name = asyncio.run(
+        legal_research.extract_company_name(
+            "申请人于2023年7月12日入职被申请人江西省欧睿康科技有限公司",
+            "请求支付经济补偿",
+            None,
+        )
+    )
+
+    assert name == "江西省欧睿康科技有限公司"
+
+
+def test_company_name_extraction_skips_llm_when_parties_confirmed(monkeypatch):
+    async def complete_json(**_kwargs):
+        raise AssertionError("不应调用大模型")
+
+    monkeypatch.setattr(legal_research, "complete_json", complete_json)
+
+    name = asyncio.run(
+        legal_research.extract_company_name(
+            "入职时签订劳动合同",
+            "请求支付工资",
+            {"parties": {"opposing": {"type": "company", "name": "甲有限公司"}}},
+        )
+    )
+
+    assert name == "甲有限公司"

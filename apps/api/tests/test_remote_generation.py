@@ -1,5 +1,6 @@
 import asyncio
 
+import app.services.remote_generation as remote_generation
 from app.services.legal_research import LegalSnapshot
 from app.services.remote_generation import _merge_known_values, research_for_generation
 
@@ -54,7 +55,13 @@ def test_generation_researches_law_cases_and_company_before_drafting():
     assert result["company"]["verified"] is True
 
 
-def test_generation_company_lookup_survives_law_and_case_failures():
+def test_generation_company_lookup_survives_law_and_case_failures(monkeypatch):
+    calls: list[str] = []
+
+    async def extract_company_name(_facts, _claims, _current_data):
+        return "甲有限公司"
+
+    monkeypatch.setattr(remote_generation, "extract_company_name", extract_company_name)
     calls: list[str] = []
 
     class Provider:
