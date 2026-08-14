@@ -274,6 +274,22 @@ async function requestLegalSearch(env: Env, query: string): Promise<Record<strin
   return result as Record<string, unknown>;
 }
 
+async function yuandianHealth(env: Env): Promise<Response> {
+  const generatorUrl = env.GENERATOR_URL?.trim();
+  const token = env.GENERATOR_AUTH_TOKEN?.trim();
+  if (!generatorUrl || !token) return json({ ok: false, reason: "generator-not-configured" }, { status: 503 });
+  try {
+    const response = await fetch(`${generatorUrl.replace(/\/$/, "")}/internal/yuandian-health`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) return json({ ok: false, reason: `generator-http-${response.status}` }, { status: 503 });
+    const result = await response.json();
+    return json(result, { status: (result as { ok?: unknown }).ok === true ? 200 : 503 });
+  } catch {
+    return json({ ok: false, reason: "generator-unavailable" }, { status: 503 });
+  }
+}
+
 async function requestAuthCode(request: Request, env: Env): Promise<Response> {
   if (testAdminOnly(env)) return json({ detail: "当前仅开放测试管理员登录" }, { status: 503 });
   const secret = env.SESSION_SECRET?.trim();
@@ -1605,6 +1621,10 @@ export default {
       } catch {
         return json({ status: "degraded", database: "unavailable", environment: env.ENVIRONMENT }, { status: 503 });
       }
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/health/yuandian") {
+      return yuandianHealth(env);
     }
 
     if (request.method === "POST" && url.pathname === "/api/auth/request-code") {

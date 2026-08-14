@@ -310,6 +310,14 @@ def create_app() -> FastAPI:
         )
         return {"law": law.as_dict(), "cases": cases.as_dict()}
 
+    @app.get("/internal/yuandian-health", include_in_schema=False)
+    async def internal_yuandian_health(authorization: str | None = Header(default=None)):
+        expected = settings.generator_internal_token
+        if not expected or not secrets.compare_digest(authorization or "", f"Bearer {expected}"):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未授权")
+        categories = await YuandianLegalResearchProvider().probe()
+        return {"ok": all(item.get("ok") is True for item in categories.values()), "categories": categories}
+
     @app.post("/internal/auth/send-otp", include_in_schema=False)
     def internal_send_otp(
         payload: InternalOtpInput,
