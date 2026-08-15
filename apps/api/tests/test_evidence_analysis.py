@@ -30,3 +30,4 @@ def test_model_timeout_keeps_extraction_and_returns_fallback(monkeypatch, tmp_pa
     assert result["name"] == "解除劳动合同协议"
     assert result["analysis"]["extracted_text"].startswith("解除劳动合同协议")
     assert result["analysis"]["analysis_fallback"] is True
+    assert result["analysis"]["page_count"] == 1

@@ -82,6 +82,7 @@ async def analyze_material(*, case: dict[str, Any], item: dict[str, Any], path: 
             "extracted_text": extraction.text,
             "extraction_version": 2,
             "vision_reviewed_pages": list(extraction.vision_reviewed_pages),
+            "page_count": int(extraction.page_count or 0),
         }
     )
     return result

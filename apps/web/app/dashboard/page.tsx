@@ -62,7 +62,9 @@ export default function DashboardPage() {
               <div className="case-row" key={record.id}>
                 <Link href={`/cases/${record.id}`} className="case-type-icon" aria-label={`打开${record.title}`}>{record.party_side === "worker" ? <UserRound size={20} /> : <Building2 size={20} />}</Link>
                 <Link href={`/cases/${record.id}`} className="case-main"><strong>{record.title}</strong><small>{record.case_stage === "arbitration" ? "劳动仲裁" : "仲裁后起诉"} · {record.party_side === "worker" ? "劳动者一方" : "用人单位一方"}</small></Link>
-                <span className={`status-badge ${record.readiness === "formal_complete" ? "complete" : "pending"}`}>{record.readiness === "formal_complete" ? "正式稿·信息完整" : "正式稿·含待填项"}</span>
+                {record.workflow?.needs_confirmation
+                  ? <span className="status-badge pending">待核对确认</span>
+                  : <span className={`status-badge ${record.readiness === "formal_complete" ? "complete" : "pending"}`}>{record.readiness === "formal_complete" ? "草稿·信息齐备" : "草稿·含待填项"}</span>}
                 <span className="case-date">{formatDate(record.created_at)}</span>
                 <button className="icon-button danger case-delete" onClick={() => deleteCase(record)} disabled={deletingCaseId === record.id} aria-label={`删除${record.title}`}><Trash2 size={17} /></button>
                 <Link href={`/cases/${record.id}`} className="case-arrow" aria-label={`打开${record.title}`}><ArrowRight size={18} /></Link>
@@ -70,7 +72,7 @@ export default function DashboardPage() {
             ))}
           </div>
         )}
-        <aside className="dashboard-tip"><FileText size={18} /><p><strong>资料不齐也可以开始。</strong>系统会在正式稿中用醒目的“待填入”标出缺失内容，不会擅自编造。</p></aside>
+        <aside className="dashboard-tip"><FileText size={18} /><p><strong>资料不齐也可以开始。</strong>系统会在草拟稿中用醒目的“待填入”标出缺失内容，不会擅自编造；生成前需要你对案情、诉请和证据清单做一次核对确认。</p></aside>
       </section>
     </main>
   );

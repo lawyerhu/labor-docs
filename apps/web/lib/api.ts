@@ -53,6 +53,23 @@ export interface Artifact {
   filename: string;
   kind: string;
   created_at?: string;
+  outdated?: boolean;
+}
+
+export interface WorkflowSummary {
+  input_revision: number;
+  confirmed_revision: number | null;
+  confirmed_at: string | null;
+  consent_cloud_processing: boolean;
+  needs_confirmation: boolean;
+}
+
+export interface EvidenceManifestRow {
+  id: string;
+  name: string;
+  purpose: string;
+  pages: string;
+  included: boolean;
 }
 
 export interface CaseRecord {
@@ -71,6 +88,7 @@ export interface CaseRecord {
   evidence_requirements: EvidenceRequirement[];
   generation_count: number;
   unlimited_generation: boolean;
+  workflow?: WorkflowSummary;
   created_at: string;
   expires_at: string;
   evidence?: EvidenceItem[];
@@ -85,14 +103,16 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }));
   if (!response.ok) {
     let message = "请求失败，请稍后重试";
+    let body: any = null;
     try {
-      const body = await response.json();
+      body = await response.json();
       message = body.detail ?? message;
     } catch {
       message = `请求失败（HTTP ${response.status}）`;
     }
-    const error = new Error(message) as Error & { status?: number };
+    const error = new Error(message) as Error & { status?: number; body?: any };
     error.status = response.status;
+    error.body = body;
     throw error;
   }
   if (response.status === 204) return undefined as T;

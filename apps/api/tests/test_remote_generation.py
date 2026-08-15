@@ -115,3 +115,39 @@ def test_generation_company_lookup_survives_law_and_case_failures(monkeypatch):
     assert result["law"]["verified"] is False
     assert result["company"]["verified"] is True
     assert result["jurisdiction"]["court"] == "苏州市吴中区人民法院"
+
+
+def test_confirmed_manifest_is_none_without_workflow_confirmation():
+    case = {"case_stage": "arbitration", "party_side": "worker", "data": {"intake": {"facts": "事实"}}}
+    assert remote_generation._confirmed_manifest(case) is None
+
+
+def test_confirmed_manifest_normalizes_rows_and_defaults():
+    case = {
+        "case_stage": "arbitration",
+        "party_side": "worker",
+        "data": {
+            "workflow": {
+                "confirmation": {
+                    "evidence_manifest": [
+                        {"id": "evidence-1", "name": "劳动合同", "purpose": "证明劳动关系", "pages": "1-3", "included": True, "order": 1},
+                        {"id": "evidence-2", "name": "工资流水", "purpose": "证明工资标准", "included": False},
+                        {"id": "evidence-3", "name": "解除通知"},
+                        {"id": "", "name": "无编号行应被忽略"},
+                        "not-a-dict",
+                    ]
+                }
+            }
+        },
+    }
+
+    manifest = remote_generation._confirmed_manifest(case)
+
+    assert manifest is not None
+    assert manifest["evidence-1"]["pages"] == "1-3"
+    assert manifest["evidence-1"]["included"] is True
+    assert manifest["evidence-1"]["order"] == 1
+    assert manifest["evidence-2"]["included"] is False
+    assert manifest["evidence-2"]["pages"] is None
+    assert manifest["evidence-3"]["included"] is True
+    assert set(manifest) == {"evidence-1", "evidence-2", "evidence-3"}

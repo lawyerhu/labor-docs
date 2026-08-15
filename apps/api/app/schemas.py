@@ -60,6 +60,7 @@ class InternalGenerationJobInput(BaseModel):
     version: int = Field(default=1, ge=1, le=1)
     job_id: str = Field(min_length=1, max_length=100)
     case_id: str = Field(min_length=1, max_length=100)
+    input_revision: int | None = Field(default=None, ge=0, le=100000)
 
 
 class InternalEvidenceAnalysisInput(BaseModel):

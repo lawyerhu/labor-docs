@@ -34,7 +34,7 @@ export default function Home() {
             <div className="paper-line" /><div className="paper-line" /><div className="paper-line half" />
             <h3>事实与理由</h3>
             <div className="paper-line" /><div className="paper-line" /><div className="paper-line" /><div className="paper-line third" />
-            <span className="paper-status"><Check size={14} /> 正式稿·信息完整</span>
+            <span className="paper-status"><Check size={14} /> 草拟稿·信息齐备</span>
           </div>
           <div className="scene-label label-one">案情与诉求分析</div>
           <div className="scene-label label-two">页码自动对应</div>
