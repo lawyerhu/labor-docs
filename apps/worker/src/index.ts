@@ -16,6 +16,7 @@ type WorkflowState = {
     facts?: string;
     claims_text?: string;
     evidence_manifest?: unknown[];
+    source?: "user" | "legacy_client";
   };
   artifacts_revision?: number | null;
 };
@@ -399,7 +400,6 @@ function passwordValue(value: unknown): string | null {
 }
 
 async function requestRegistrationCode(request: Request, env: Env): Promise<Response> {
-  if (testAdminOnly(env)) return json({ detail: "当前仅开放测试管理员登录" }, { status: 503 });
   const secret = env.SESSION_SECRET?.trim();
   if (!secret) return json({ detail: "登录服务尚未配置" }, { status: 503 });
   let body: { email?: unknown };
@@ -410,6 +410,7 @@ async function requestRegistrationCode(request: Request, env: Env): Promise<Resp
   }
   const email = normalizeEmail(body.email);
   if (!email) return json({ detail: "请输入有效的邮箱地址" }, { status: 422 });
+  if (isTestAdminEmail(env, email)) return json({ detail: "该邮箱为测试管理员账号，请使用管理员密码登录" }, { status: 409 });
 
   const existing = await env.DB.prepare("SELECT password_hash FROM users WHERE email = ?").bind(email).first<{ password_hash: string | null }>();
   if (existing?.password_hash) return json({ detail: "该邮箱已注册，请直接使用密码登录" }, { status: 409 });
@@ -439,7 +440,6 @@ async function requestRegistrationCode(request: Request, env: Env): Promise<Resp
 }
 
 async function registerPassword(request: Request, env: Env): Promise<Response> {
-  if (testAdminOnly(env)) return json({ detail: "当前仅开放测试管理员登录" }, { status: 503 });
   const secret = env.SESSION_SECRET?.trim();
   if (!secret) return json({ detail: "登录服务尚未配置" }, { status: 503 });
   let body: PasswordAuthBody;
@@ -454,6 +454,7 @@ async function registerPassword(request: Request, env: Env): Promise<Response> {
   if (!email || !password || !/^\d{6}$/.test(code)) {
     return json({ detail: "邮箱、密码或验证码格式不正确" }, { status: 400 });
   }
+  if (isTestAdminEmail(env, email)) return json({ detail: "该邮箱为测试管理员账号，请使用管理员密码登录" }, { status: 409 });
 
   const record = await env.DB.prepare(
     "SELECT id, code_hash, expires_at, attempts FROM otp_codes WHERE email = ? AND purpose = 'register' AND consumed_at IS NULL ORDER BY created_at DESC LIMIT 1",
@@ -515,8 +516,6 @@ async function loginPassword(request: Request, env: Env): Promise<Response> {
     const token = await createSessionToken(secret, publicUser);
     return json(publicUser, { headers: { "Set-Cookie": sessionCookie(token) } });
   }
-
-  if (testAdminOnly(env)) return json({ detail: "邮箱或密码不正确" }, { status: 401 });
 
   const user = await env.DB.prepare("SELECT id, email, password_hash, email_verified FROM users WHERE email = ?").bind(email).first<{ id: string; email: string; password_hash: string | null; email_verified: number }>();
   if (!user?.password_hash || user.email_verified !== 1 || !(await verifyPassword(password, user.password_hash))) {
@@ -637,6 +636,40 @@ function workflowSummary(workflow: WorkflowState) {
     consent_cloud_processing: workflow.consent_cloud_processing === true,
     needs_confirmation: needsConfirmation(workflow),
   };
+}
+
+async function confirmLegacyGeneration(
+  env: Env,
+  caseId: string,
+  data: Record<string, unknown>,
+  workflow: WorkflowState,
+): Promise<void> {
+  const intake = data.intake && typeof data.intake === "object" && !Array.isArray(data.intake)
+    ? data.intake as Record<string, unknown>
+    : {};
+  const evidence = await env.DB.prepare(
+    "SELECT id, name, purpose FROM evidence WHERE case_id = ? ORDER BY created_at, id",
+  ).bind(caseId).all<{ id: string; name: string; purpose: string }>();
+  const manifest = evidence.results.map((item, index) => ({
+    id: item.id,
+    name: item.name || "材料",
+    purpose: item.purpose || "",
+    pages: null,
+    included: true,
+    order: index + 1,
+  }));
+  workflow.confirmed_revision = workflow.input_revision;
+  workflow.confirmed_at = new Date().toISOString();
+  workflow.consent_cloud_processing = true;
+  workflow.confirmation = {
+    facts: String(intake.facts || "").trim(),
+    claims_text: String(intake.claims_text || "").trim(),
+    evidence_manifest: manifest,
+    source: "legacy_client",
+  };
+  data.workflow = workflow;
+  await env.DB.prepare("UPDATE cases SET data_json = ? WHERE id = ?")
+    .bind(JSON.stringify(data), caseId).run();
 }
 
 function hasValue(value: unknown): boolean {
@@ -947,7 +980,7 @@ async function confirmCase(request: Request, env: Env, caseId: string): Promise<
   workflow.consent_cloud_processing = true;
   workflow.confirmed_revision = workflow.input_revision;
   workflow.confirmed_at = new Date().toISOString();
-  workflow.confirmation = { facts, claims_text: claimsText, evidence_manifest: manifest };
+  workflow.confirmation = { facts, claims_text: claimsText, evidence_manifest: manifest, source: "user" };
   data.workflow = workflow;
   intake.facts = facts;
   intake.claims_text = claimsText;
@@ -1244,7 +1277,10 @@ async function generateCase(request: Request, env: Env, caseId: string): Promise
   const data = parseCaseData(owned.row.data_json);
   const workflow = workflowFor(data);
   if (needsConfirmation(workflow)) {
-    return json({ detail: "案情或材料有更新，请先核对并确认后再生成", needs_confirmation: true }, { status: 409 });
+    if (request.headers.get("X-Client-Version")?.trim() === "review-v1") {
+      return json({ detail: "案情或材料有更新，请先核对并确认后再生成", needs_confirmation: true }, { status: 409 });
+    }
+    await confirmLegacyGeneration(env, caseId, data, workflow);
   }
   workflow.consent_cloud_processing = true;
   data.workflow = workflow;
@@ -1389,7 +1425,7 @@ async function enqueueGeneration(request: Request, env: Env): Promise<Response> 
   const data = parseCaseData(caseRow?.data_json ?? "{}");
   const workflow = workflowFor(data);
   if (needsConfirmation(workflow)) {
-    return json({ detail: "案情或材料有更新，请先核对并确认后再生成", needs_confirmation: true }, { status: 409 });
+    await confirmLegacyGeneration(env, caseId, data, workflow);
   }
   const runningJob = await env.DB.prepare(
     "SELECT id FROM generation_jobs WHERE case_id = ? AND status IN ('queued', 'running', 'dispatched', 'finalizing') LIMIT 1",

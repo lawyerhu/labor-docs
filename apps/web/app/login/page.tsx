@@ -37,9 +37,9 @@ export default function LoginPage() {
       <div className="auth-top"><Brand /><Link href="/" className="text-link"><ArrowLeft size={16} /> 返回首页</Link></div>
       <section className="auth-panel">
         <div className="auth-copy">
-          <div className="eyebrow"><span /> 内部测试登录</div>
-          <h1>测试管理员登录</h1>
-          <p>当前版本仅开放内部测试账号，注册和邮箱验证码登录暂未开放。</p>
+          <div className="eyebrow"><span /> 账号登录</div>
+          <h1>登录劳动文书助手</h1>
+          <p>使用注册邮箱和密码登录；还没有账号，可以先免费注册。</p>
         </div>
         <form onSubmit={submit} className="auth-form">
           <label className="field">
@@ -52,7 +52,8 @@ export default function LoginPage() {
             {loading ? "正在登录…" : <>登录并继续 <ArrowRight size={18} /></>}
           </button>
         </form>
-        <p className="auth-security"><ShieldCheck size={16} /> 测试账号配置在服务器环境变量中，不会写入网页或代码。</p>
+        <p className="auth-mode-actions">还没有账号？<Link href="/register" className="text-link">免费注册</Link></p>
+        <p className="auth-security"><ShieldCheck size={16} /> 密码经过加密存储，登录状态仅保存在当前会话中。</p>
       </section>
     </main>
   );

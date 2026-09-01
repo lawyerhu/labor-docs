@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertCircle, ArrowLeft, Check, Download, FileText, Info, ListChecks, LoaderCircle, Paperclip, RefreshCw, Send, ShieldCheck, Sparkles, Trash2, UploadCloud } from "lucide-react";
+import { AlertCircle, ArrowLeft, Download, FileText, ListChecks, LoaderCircle, Paperclip, RefreshCw, Send, ShieldCheck, Sparkles, Trash2, UploadCloud } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -23,7 +23,7 @@ const generationStageLabels: Record<string, string> = {
   failed: "生成暂未完成",
 };
 
-const CLOUD_CONSENT_TEXT = "我同意将本案件的案情说明、诉请和上传材料的内容发送至云端大模型和元典法律数据库，用于本次分析、检索与文书撰写；材料仅用于本案件，不会用于训练。";
+const CLIENT_VERSION = "review-v1";
 const UNSUPPORTED_IMAGE_ERROR = /(?:ERROR:\s*)?Cannot read\s+[^\n]*?\(this model does not support image input\)\.?\s*(?:Inform the user\.)?/gi;
 
 function cleanModelText(value: unknown): string {
@@ -46,7 +46,6 @@ export default function CaseWorkspacePage() {
   const [generationJobId, setGenerationJobId] = useState<string | null>(null);
   const [analysisBusy, setAnalysisBusy] = useState(false);
   const [supplement, setSupplement] = useState("");
-  const [consentCloud, setConsentCloud] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   const reloadSeq = useRef(0);
 
@@ -134,15 +133,11 @@ export default function CaseWorkspacePage() {
 
   async function uploadFiles(files: FileList | null) {
     if (!files?.length) return;
-    if (!consentCloud) {
-      setError("请先勾选同意将材料发送至云端处理");
-      return;
-    }
     setBusy(true); setError("");
     try {
       for (const file of Array.from(files)) {
         setUploads((current) => ({ ...current, [file.name]: 1 }));
-        await uploadEvidence(params.id, file, consentCloud, (progress) => {
+        await uploadEvidence(params.id, file, true, (progress) => {
           setUploads((current) => ({ ...current, [file.name]: progress }));
         });
         setUploads((current) => { const next = { ...current }; delete next[file.name]; return next; });
@@ -168,15 +163,11 @@ export default function CaseWorkspacePage() {
   }
 
   async function analyzeCase(message = "请重新分析案情和诉请，指出确有必要补充的信息，并结合类案整理建议提交的证据。") {
-    if (!consentCloud) {
-      setError("请先勾选同意将案情发送至云端处理");
-      return;
-    }
     setAnalysisBusy(true); setBusy(true); setError("");
     try {
       await api(`/api/cases/${params.id}/chat`, {
         method: "POST",
-        body: JSON.stringify({ message, consent_cloud_processing: consentCloud }),
+        body: JSON.stringify({ message, consent_cloud_processing: true }),
       });
       await reload();
     } catch (reason) {
@@ -209,16 +200,13 @@ export default function CaseWorkspacePage() {
   }
 
   async function generate() {
-    if (!consentCloud) {
-      setError("请先勾选同意将案情与材料发送至云端处理");
-      return;
-    }
     let trackingStarted = false;
     setBusy(true); setError(""); setGeneration({ stage: "正在创建生成任务", progress: 3 });
     try {
       const result = await api<{ artifacts?: Artifact[]; job_id?: string }>(`/api/cases/${params.id}/generate`, {
         method: "POST",
-        body: JSON.stringify({ consent_cloud_processing: consentCloud }),
+        headers: { "X-Client-Version": CLIENT_VERSION },
+        body: JSON.stringify({ consent_cloud_processing: true }),
       });
       if (result.job_id) {
         trackingStarted = true;
@@ -254,15 +242,11 @@ export default function CaseWorkspacePage() {
   }
 
   async function confirmAndGenerate(facts: string, claims: string, manifest: EvidenceManifestRow[]) {
-    if (!consentCloud) {
-      setError("请先勾选同意将案情与材料发送至云端处理");
-      return;
-    }
     setBusy(true); setError("");
     try {
       await api(`/api/cases/${params.id}/confirm`, {
         method: "POST",
-        body: JSON.stringify({ facts, claims_text: claims, evidence_manifest: manifest, consent_cloud_processing: consentCloud }),
+        body: JSON.stringify({ facts, claims_text: claims, evidence_manifest: manifest, consent_cloud_processing: true }),
       });
       await reload();
       await generate();
@@ -273,15 +257,11 @@ export default function CaseWorkspacePage() {
   }
 
   async function retryEvidence(item: EvidenceItem) {
-    if (!consentCloud) {
-      setError("请先勾选同意将材料发送至云端处理");
-      return;
-    }
     setBusy(true); setError("");
     try {
       await api(`/api/cases/${params.id}/evidence/${item.id}/retry`, {
         method: "POST",
-        body: JSON.stringify({ consent_cloud_processing: consentCloud }),
+        body: JSON.stringify({ consent_cloud_processing: true }),
       });
       await reload();
     } catch (reason) {
@@ -335,8 +315,6 @@ export default function CaseWorkspacePage() {
     <section className="linear-content">
       {error && <div className="notice notice-error"><AlertCircle size={17} />{error}<button onClick={() => setError("")}>关闭</button></div>}
 
-      <label className="consent-line"><input type="checkbox" checked={consentCloud} onChange={(event) => setConsentCloud(event.target.checked)} />{CLOUD_CONSENT_TEXT}</label>
-
       <div className="analysis-card">
         <div className="eyebrow"><span /> 案情与证据分析</div>
         <h1>{analysisPending ? "正在分析案情和诉请" : analysis ? "案情分析完成，补充必要信息" : "先分析案情和诉请"}</h1>
@@ -352,31 +330,19 @@ export default function CaseWorkspacePage() {
           <textarea rows={4} value={supplement} onChange={(event) => setSupplement(event.target.value)} placeholder="可以一次性回答上面的多个问题，也可以说明暂时无法提供。" />
           <button className="button button-secondary" onClick={submitSupplement} disabled={analysisBusy}><Send size={16} /> 合并补充信息</button>
         </div>}
-        {!analysisPending && (!analysis || analysis.analysis_status === "fallback") && <button className="button button-secondary" onClick={() => analyzeCase()} disabled={analysisBusy || !consentCloud}><Sparkles size={17} /> {analysisBusy ? "正在分析…" : analysis ? "重新分析案情和诉请" : "开始分析案情和诉请"}</button>}
+        {!analysisPending && (!analysis || analysis.analysis_status === "fallback") && <button className="button button-secondary" onClick={() => analyzeCase()} disabled={analysisBusy}><Sparkles size={17} /> {analysisBusy ? "正在分析…" : analysis ? "重新分析案情和诉请" : "开始分析案情和诉请"}</button>}
       </div>
 
       <div className="evidence-card">
         <div><div className="eyebrow"><span /> 材料识别</div><h2>上传你实际持有的材料</h2><p>大模型阅读内容后命名材料，生成时会结合全案编排证据目录；随后按连续页码统一排版。</p></div>
-        <button className="upload-zone" onClick={() => fileRef.current?.click()} disabled={busy || !consentCloud}><UploadCloud size={25} /><strong>选择材料</strong><span>PDF、图片、Word、Excel；单个不超过 50MB</span><input ref={fileRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx" onChange={(event) => uploadFiles(event.target.files)} hidden /></button>
+        <button className="upload-zone" onClick={() => fileRef.current?.click()} disabled={busy}><UploadCloud size={25} /><strong>选择材料</strong><span>PDF、图片、Word、Excel；单个不超过 50MB</span><input ref={fileRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx" onChange={(event) => uploadFiles(event.target.files)} hidden /></button>
         {Object.entries(uploads).map(([name, progress]) => <ProgressBlock key={name} label={`正在上传：${name}`} progress={progress} />)}
         {!record.evidence?.length
           ? <div className="empty-evidence"><Paperclip size={20} /><span>可以不上传材料；系统仍会依据现有说明生成含待填项的正式稿。</span></div>
           : <div className="evidence-list">{record.evidence.map((item, index) => <EvidenceCard item={item} index={index} key={item.id} onDelete={() => deleteEvidence(item)} onRetry={() => retryEvidence(item)} />)}</div>}
       </div>
 
-      {!analysisPending && !materialProcessing && <GenerationReviewCard key={(record.evidence ?? []).map((item) => `${item.id}:${item.status}:${item.name}`).join("|")} record={record} consentCloud={consentCloud} busy={busy} open={reviewOpen} onOpen={() => setReviewOpen(true)} onConfirm={confirmAndGenerate} />}
-
-      <div className="generation-card">
-        <div><div className="eyebrow"><span /> 全案生成</div><h2>大模型撰写，程序确定排版</h2></div>
-         <div className="output-preview"><OutputRow name={record.case_stage === "litigation" ? "民事起诉状（要素式、普通式）" : "劳动人事争议仲裁申请书"} type="DOCX" /><OutputRow name="证据目录（横向四列）" type="DOCX" /><OutputRow name="证据材料（连续页码）" type="PDF" muted={!record.evidence?.length} /></div>
-        {generation && <ProgressBlock label={generation.stage} progress={generation.progress} />}
-        <button className="button button-primary button-large generate-button" onClick={generate} disabled={busy || materialProcessing || !consentCloud || (record.access_status === "locked" && !record.unlimited_generation) || (!record.unlimited_generation && record.generation_count >= 3)}>{busy ? <><LoaderCircle className="spin" /> 正在生成…</> : <><Sparkles size={19} /> 大模型撰写并生成正式材料</>}<span>{record.unlimited_generation ? `${record.generation_count} 次 · 不限量` : `${record.generation_count}/3 次`}</span></button>
-        {materialProcessing && <div className="form-hint">材料仍在识别，完成后即可生成。</div>}
-        {!consentCloud && <div className="form-hint">请先勾选上方同意说明。</div>}
-        {record.access_status === "locked" && !record.unlimited_generation && <div className="form-error">该案件需要兑换码后才能生成。</div>}
-        {!!record.artifacts?.length && <div className="downloads">{record.artifacts.map((artifact) => <button className="download-row" onClick={() => downloadArtifact(artifact)} key={artifact.id} disabled={busy}><FileText size={19} /><span><strong>{artifact.filename}</strong><small>{artifact.outdated ? "案情或材料已更新，此文件可能不包含最新内容" : "点击下载"}</small></span>{artifact.outdated ? <span className="artifact-outdated">已过期</span> : <Download size={18} />}</button>)}</div>}
-        <div className="legal-note"><Info size={17} /><p>系统会结合已核验的法律检索结果进行撰写；无法核验的具体条款不会被编造。</p></div>
-      </div>
+      {!analysisPending && !materialProcessing && <GenerationReviewCard key={(record.evidence ?? []).map((item) => `${item.id}:${item.status}:${item.name}`).join("|")} record={record} busy={busy} open={reviewOpen} generation={generation} onGenerate={generate} onDownload={downloadArtifact} onConfirm={confirmAndGenerate} />}
     </section>
   </main>;
 }
@@ -421,12 +387,13 @@ function buildManifestRows(record: CaseRecord): EvidenceManifestRow[] {
   });
 }
 
-function GenerationReviewCard({ record, consentCloud, busy, open, onOpen, onConfirm }: {
+function GenerationReviewCard({ record, busy, open, generation, onGenerate, onDownload, onConfirm }: {
   record: CaseRecord;
-  consentCloud: boolean;
   busy: boolean;
   open: boolean;
-  onOpen: () => void;
+  generation: { stage: string; progress: number } | null;
+  onGenerate: () => void;
+  onDownload: (artifact: Artifact) => void;
   onConfirm: (facts: string, claims: string, manifest: EvidenceManifestRow[]) => void;
 }) {
   const needsConfirmation = record.workflow?.needs_confirmation !== false;
@@ -443,6 +410,8 @@ function GenerationReviewCard({ record, consentCloud, busy, open, onOpen, onConf
   }
 
   const includedCount = manifest.filter((row) => row.included).length;
+  const generationBlocked = (record.access_status === "locked" && !record.unlimited_generation)
+    || (!record.unlimited_generation && record.generation_count >= 3);
   return <section className={`review-card ${needsConfirmation ? "pending" : "complete"}`}>
     <div className="review-heading" onClick={() => setExpanded((value) => !value)} role="button" tabIndex={0}>
       <ShieldCheck size={19} />
@@ -461,16 +430,17 @@ function GenerationReviewCard({ record, consentCloud, busy, open, onOpen, onConf
             <span className="manifest-pages"><input value={row.pages} onChange={(event) => patchRow(row.id, { pages: event.target.value })} placeholder="页码，如 1-3" disabled={!row.included} /><em>不填则整份纳入</em></span>
           </label>
         ))}</div>}
-      <div className="review-actions"><span>确认后系统将按此清单排版证据目录与证据材料。</span><button className="button button-primary" onClick={() => onConfirm(facts, claims, manifest)} disabled={busy || !consentCloud || !facts.trim()}>{busy ? <><LoaderCircle className="spin" /> 正在确认并生成…</> : <><ShieldCheck size={16} /> 确认并生成</>}</button></div>
+      <div className="review-actions"><span>确认后系统将按此清单排版证据目录与证据材料。</span><button className="button button-primary" onClick={() => onConfirm(facts, claims, manifest)} disabled={busy || !facts.trim()}>{busy ? <><LoaderCircle className="spin" /> 正在确认并生成…</> : <><ShieldCheck size={16} /> 确认并生成</>}</button></div>
     </div>}
+    {generation && <div className="review-runtime"><ProgressBlock label={generation.stage} progress={generation.progress} /></div>}
+    {!needsConfirmation && !generation && !generationBlocked && <button className="button button-primary review-generate" onClick={onGenerate} disabled={busy}><Sparkles size={17} /> {record.artifacts?.length ? "重新生成材料" : "开始生成材料"}</button>}
+    {record.access_status === "locked" && !record.unlimited_generation && <div className="form-error review-error">该案件需要兑换码后才能生成。</div>}
+    {!record.unlimited_generation && record.generation_count >= 3 && <div className="form-error review-error">本案件最多成功生成3次。</div>}
+    {!!record.artifacts?.length && <div className="downloads">{record.artifacts.map((artifact) => <button className="download-row" onClick={() => onDownload(artifact)} key={artifact.id} disabled={busy}><FileText size={19} /><span><strong>{artifact.filename}</strong><small>{artifact.outdated ? "案情或材料已更新，此文件可能不包含最新内容" : "点击下载"}</small></span>{artifact.outdated ? <span className="artifact-outdated">已过期</span> : <Download size={18} />}</button>)}</div>}
   </section>;
 }
 
 function ProgressBlock({ label, progress, compact = false }: { label: string; progress: number; compact?: boolean }) {
   const safe = Math.max(0, Math.min(100, Math.round(progress)));
   return <div className={`task-progress ${compact ? "compact" : ""}`} role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={safe}><div><span>{label}</span><strong>{safe}%</strong></div><div className="progress-track"><span style={{ width: `${safe}%` }} /></div></div>;
-}
-
-function OutputRow({ name, type, muted }: { name: string; type: string; muted?: boolean }) {
-  return <div className={`output-row ${muted ? "muted" : ""}`}><span className="file-type">{type}</span><strong>{name}</strong>{muted ? <Info size={17} /> : <Check size={17} />}</div>;
 }

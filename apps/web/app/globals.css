@@ -122,6 +122,9 @@ svg { flex: none; }
 .form-error { padding: 10px 12px; color: var(--red); background: var(--red-soft); border-left: 3px solid var(--red); font-size: 13px; }
 .auth-mode-actions { margin-top: 18px; display: flex; justify-content: center; flex-wrap: wrap; gap: 14px; }
 .auth-mode-actions .text-link { border: 0; padding: 0; background: transparent; cursor: pointer; font: inherit; }
+.auth-message { padding: 10px 12px; color: var(--green); background: var(--green-soft); border-left: 3px solid var(--green); font-size: 13px; }
+.code-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.code-row .button { min-width: 122px; }
 .auth-security { margin: 22px 0 0; display: flex; justify-content: center; align-items: center; gap: 7px; color: var(--muted-text); font-size: 12px; }
 
 /* Shared app */
@@ -270,8 +273,6 @@ svg { flex: none; }
 .evidence-summary > strong { font-size: 15px; }
 .evidence-summary > small { color: var(--muted-text); overflow-wrap: anywhere; }
 .evidence-summary dl { margin: 5px 0 0; display: grid; grid-template-columns: .8fr 1.5fr; gap: 10px; }
-.consent-line { display: flex; align-items: flex-start; gap: 10px; margin: 0 32px 28px; color: var(--muted-text); font-size: 13px; line-height: 1.6; }
-.consent-line input { width: 17px; height: 17px; margin-top: 2px; accent-color: var(--blue); flex: 0 0 auto; }
 .evidence-summary dl > div { padding: 10px 12px; background: #f7f9fc; border: 1px solid var(--line); }
 .evidence-summary dt { color: var(--muted-text); font-size: 11px; font-weight: 700; }
 .evidence-summary dd { margin: 4px 0 0; color: var(--ink-soft); font-size: 13px; line-height: 1.6; }
@@ -288,32 +289,20 @@ svg { flex: none; }
 .readiness-icon { margin-top: 2px; }
 .readiness-card strong { color: currentColor; }
 .readiness-card p { margin: 3px 0 0; color: var(--ink-soft); font-size: 13px; }
-.check-section, .output-preview, .downloads { margin: 25px 32px; }
+.check-section, .downloads { margin: 25px 32px; }
 .legal-check-panel { margin: 25px 32px; padding: 18px; border: 1px solid var(--line); background: #fbfcfe; }
 .legal-check-panel h2 { margin: 0 0 5px; font-size: 15px; }
 .legal-check-panel p { margin: 0; color: var(--muted-text); font-size: 12px; }
 .legal-check-form { display: flex; gap: 10px; margin-top: 14px; }
 .legal-check-form input { flex: 1; min-width: 0; }
-.check-section h2, .output-preview > h2, .downloads h2 { margin: 0 0 12px; font-size: 15px; }
+.check-section h2, .downloads h2 { margin: 0 0 12px; font-size: 15px; }
 .check-section h2 span { margin-left: 5px; padding: 1px 6px; color: var(--amber); background: var(--amber-soft); border-radius: 9px; font-size: 10px; }
 .tag-list { display: flex; flex-wrap: wrap; gap: 7px; }
 .tag-list span { padding: 5px 8px; color: var(--ink-soft); background: #f4f6f9; border: 1px solid var(--line); border-radius: 4px; font-size: 12px; }
 .check-section ul { margin: 0; padding-left: 18px; color: var(--ink-soft); font-size: 13px; }
-.output-preview { border: 1px solid var(--line); }
-.output-preview > h2 { padding: 14px 16px; margin: 0; background: #f7f8fa; border-bottom: 1px solid var(--line); }
-.output-row { min-height: 58px; padding: 9px 14px; display: grid; grid-template-columns: 48px 1fr 20px; gap: 11px; align-items: center; border-bottom: 1px solid var(--line); }
-.output-row:last-child { border-bottom: 0; }
-.output-row > svg { color: var(--green); }
-.output-row.muted { opacity: .55; }
-.file-type { padding: 4px 5px; text-align: center; color: var(--blue); background: var(--blue-soft); border-radius: 3px; font-size: 10px; font-weight: 800; }
-.output-row strong, .output-row small { display: block; }
-.output-row strong { font-size: 13px; }
-.output-row small { color: var(--muted-text); font-size: 11px; }
 .redeem-panel { margin: 25px 32px; padding: 18px; display: flex; align-items: center; justify-content: space-between; gap: 20px; background: #f7f8fa; border: 1px solid var(--line); }
 .redeem-panel p { margin: 2px 0 0; color: var(--muted-text); font-size: 12px; }
 .redeem-form { display: flex; gap: 8px; }
-.generate-button { margin: 28px 32px; width: calc(100% - 64px); }
-.generate-button > span:last-child { margin-left: auto; padding-left: 15px; color: rgba(255,255,255,.75); font-size: 11px; font-weight: 500; }
 .downloads { border: 1px solid #bed3cb; }
 .downloads-heading { padding: 13px 15px; display: flex; justify-content: space-between; align-items: center; background: var(--green-soft); border-bottom: 1px solid #bed3cb; }
 .downloads-heading h2 { margin: 0; color: var(--green); }
@@ -326,8 +315,6 @@ svg { flex: none; }
 .download-row strong { font-size: 13px; }
 .download-row small { color: var(--muted-text); font-size: 11px; }
 .download-row > svg { color: var(--green); }
-.legal-note { margin: 28px 32px; padding-top: 18px; display: flex; gap: 10px; color: var(--muted-text); border-top: 1px solid var(--line); font-size: 12px; }
-.legal-note p { margin: 0; }
 .workspace-loading { min-height: 100vh; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--muted-text); }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -341,7 +328,7 @@ svg { flex: none; }
 .intake-card .button { width: 100%; margin-top: 24px; }
 .privacy-note { margin: 22px 0 15px; padding: 14px; display: flex; gap: 10px; color: var(--ink-soft); background: #eef3f9; border-left: 3px solid #8aa3c2; font-size: 13px; }
 .linear-content { width: min(940px, calc(100% - 32px)); margin: 32px auto 80px; display: grid; gap: 22px; }
-.analysis-card, .evidence-card, .generation-card { padding: 32px; background: white; border: 1px solid var(--line); box-shadow: var(--shadow-sm); }
+.analysis-card, .evidence-card { padding: 32px; background: white; border: 1px solid var(--line); box-shadow: var(--shadow-sm); }
 .review-card { padding: 0; background: white; border: 1px solid var(--line); border-left-width: 4px; box-shadow: var(--shadow-sm); }
 .review-card.pending { border-left-color: var(--amber); }
 .review-card.complete { border-left-color: var(--green); }
@@ -370,6 +357,9 @@ svg { flex: none; }
 .manifest-pages em { color: var(--muted-text); font-size: 10px; font-style: normal; }
 .review-actions { padding-top: 6px; display: flex; justify-content: space-between; align-items: center; gap: 18px; }
 .review-actions > span { color: var(--muted-text); font-size: 12px; }
+.review-runtime { padding: 0 32px; }
+.review-generate { width: calc(100% - 64px); margin: 22px 32px; }
+.review-error { margin: 0 32px 20px; }
 .artifact-outdated { padding: 4px 8px; color: var(--amber); background: var(--amber-soft); border-radius: 4px; font-size: 11px; font-weight: 800; white-space: nowrap; }
 .analysis-card h1 { margin: 12px 0 8px; font-family: "Noto Serif SC", SimSun, serif; font-size: 31px; }
 .analysis-card > p, .evidence-card > div:first-child p { margin: 0; color: var(--ink-soft); white-space: pre-wrap; }
@@ -388,13 +378,10 @@ svg { flex: none; }
 .analysis-followups > strong { color: var(--ink); font-size: 13px; }
 .analysis-followups textarea { width: 100%; margin-top: 12px; padding: 12px; resize: vertical; border: 1px solid var(--line-dark); border-radius: 6px; }
 .analysis-followups .button { margin-top: 12px; }
-.evidence-card h2, .generation-card h2 { margin: 8px 0 5px; }
+.evidence-card h2 { margin: 8px 0 5px; }
 .suggestions { margin-top: 22px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .suggestions strong { margin-right: 4px; font-size: 13px; }
 .suggestions span { padding: 5px 9px; color: var(--ink-soft); background: #f4f6f9; border: 1px solid var(--line); font-size: 12px; }
-.generation-card .output-preview { margin-left: 0; margin-right: 0; }
-.generation-card .generate-button { width: 100%; margin-left: 0; margin-right: 0; }
-.generation-card .downloads, .generation-card .legal-note { margin-left: 0; margin-right: 0; }
 
 @media (max-width: 1000px) {
   .hero { grid-template-columns: 1fr; padding-top: 60px; }
@@ -420,6 +407,8 @@ svg { flex: none; }
   .steps-grid { grid-template-columns: 1fr; }
   .landing-footer { align-items: flex-start; flex-direction: column; gap: 18px; }
   .auth-panel { margin-top: 35px; padding: 30px 22px; }
+  .code-row { grid-template-columns: 1fr; }
+  .code-row .button { width: 100%; }
   .account-email { display: none; }
   .dashboard { padding-top: 34px; }
   .dashboard-heading { align-items: flex-start; flex-direction: column; }
@@ -454,7 +443,7 @@ svg { flex: none; }
   .sticky-actions > span { display: none; }
   .sticky-actions .button { width: 100%; }
   .upload-zone { width: calc(100% - 36px); margin-left: 18px; margin-right: 18px; }
-  .empty-evidence, .readiness-card, .check-section, .output-preview, .downloads, .legal-note, .redeem-panel, .legal-check-panel { margin-left: 18px; margin-right: 18px; }
+   .empty-evidence, .readiness-card, .check-section, .downloads, .redeem-panel, .legal-check-panel { margin-left: 18px; margin-right: 18px; }
   .legal-check-form { flex-direction: column; }
   .evidence-list { padding-left: 18px; padding-right: 18px; }
   .evidence-item { grid-template-columns: 34px 1fr; }
@@ -463,13 +452,15 @@ svg { flex: none; }
   .evidence-summary dl { grid-template-columns: 1fr; }
   .redeem-panel { align-items: stretch; flex-direction: column; }
   .redeem-form { flex-direction: column; }
-  .generate-button { width: calc(100% - 36px); margin-left: 18px; margin-right: 18px; }
   .intake-card { margin-top: 20px; padding: 26px 20px; }
   .intake-card h1 { font-size: 30px; }
   .linear-content { width: 100%; margin-top: 12px; gap: 12px; }
-  .analysis-card, .evidence-card, .generation-card { padding: 22px 18px; border-left: 0; border-right: 0; }
+   .analysis-card, .evidence-card { padding: 22px 18px; border-left: 0; border-right: 0; }
   .review-heading { padding: 20px 18px; }
-  .review-body { padding: 0 18px 22px; }
+   .review-body { padding: 0 18px 22px; }
+   .review-runtime { padding: 0 18px; }
+   .review-generate { width: calc(100% - 36px); margin-left: 18px; margin-right: 18px; }
+   .review-error { margin-left: 18px; margin-right: 18px; }
   .manifest-row { grid-template-columns: 20px 1fr; }
   .manifest-pages { grid-column: 2; }
   .review-actions { align-items: stretch; flex-direction: column; }
@@ -478,7 +469,6 @@ svg { flex: none; }
   .evidence-card .upload-zone { width: 100%; margin-left: 0; margin-right: 0; }
   .evidence-card .empty-evidence { margin-left: 0; margin-right: 0; }
   .evidence-card .evidence-list { padding-left: 0; padding-right: 0; }
-  .generation-card .generate-button { width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {
