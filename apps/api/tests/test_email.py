@@ -76,10 +76,10 @@ def test_send_otp_email_accepts_accidentally_pasted_env_lines(monkeypatch):
 @pytest.mark.parametrize(
     ("status_code", "body", "expected"),
     [
-        (401, {"message": "API key is invalid"}, "Resend API 密钥无效"),
-        (403, {"message": "domain is not verified"}, "Resend 发件人域名未验证"),
-        (422, {"message": "sender domain is not verified"}, "Resend 发件人域名未验证"),
-        (429, {"message": "rate limit"}, "Resend 邮件发送额度或频率"),
+        (401, {"name": "invalid_api_key", "message": "API key is invalid"}, "name=invalid_api_key; message=API key is invalid"),
+        (403, {"name": "domain_not_verified", "message": "domain is not verified"}, "name=domain_not_verified; message=domain is not verified"),
+        (422, {"name": "validation_error", "message": "sender domain is not verified"}, "name=validation_error; message=sender domain is not verified"),
+        (429, {"name": "rate_limit_exceeded", "message": "rate limit"}, "name=rate_limit_exceeded; message=rate limit"),
     ],
 )
 def test_send_otp_email_explains_resend_errors(monkeypatch, status_code, body, expected):

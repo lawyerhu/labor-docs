@@ -67,6 +67,7 @@ const EVIDENCE_ANALYSIS_TIMEOUT_MS = 3 * 60 * 1000;
 const EVIDENCE_ANALYSIS_MAX_ATTEMPTS = 3;
 const EVIDENCE_STALE_MS = 15 * 60 * 1000;
 const CASE_ANALYSIS_TIMEOUT_MS = 120 * 1000;
+const EMAIL_SEND_TIMEOUT_MS = 45 * 1000;
 
 type PublicUser = { id: string; email: string; unlimited_generation?: boolean };
 
@@ -220,6 +221,8 @@ async function sendOtpEmail(env: Env, email: string, code: string): Promise<Emai
   const generatorUrl = env.GENERATOR_URL?.trim();
   const generatorToken = env.GENERATOR_AUTH_TOKEN?.trim();
   if (!generatorUrl || !generatorToken) return { ok: false, detail: "邮件服务连接尚未配置" };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new DOMException("email service timeout", "TimeoutError")), EMAIL_SEND_TIMEOUT_MS);
   try {
     const response = await fetch(`${generatorUrl.replace(/\/$/, "")}/internal/auth/send-otp`, {
       method: "POST",
@@ -228,17 +231,23 @@ async function sendOtpEmail(env: Env, email: string, code: string): Promise<Emai
         Authorization: `Bearer ${generatorToken}`,
       },
       body: JSON.stringify({ email, code }),
+      signal: controller.signal,
     });
     if (response.ok) return { ok: true };
-    let detail = "验证码邮件发送失败，请稍后重试";
+    let detail = `邮件服务返回 HTTP ${response.status}`;
     try {
       const body = await response.json() as { detail?: unknown };
-      if (typeof body.detail === "string" && body.detail.length <= 200) detail = body.detail;
+      if (typeof body.detail === "string" && body.detail.length <= 500) detail = body.detail;
     } catch {}
     if (response.status === 401) detail = "邮件服务内部令牌不匹配";
     return { ok: false, detail };
-  } catch {
-    return { ok: false, detail: "无法连接邮件生成服务，请稍后重试" };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      return { ok: false, detail: `邮件服务超过 ${EMAIL_SEND_TIMEOUT_MS / 1000} 秒未响应` };
+    }
+    return { ok: false, detail: `无法连接邮件生成服务：${String(error)}` };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

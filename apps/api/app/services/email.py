@@ -50,7 +50,8 @@ def send_otp_email(recipient: str, code: str) -> None:
             error_body = response.json()
         except ValueError:
             error_body = {}
-        error_code = str(error_body.get("code") or "")
+        error_name = str(error_body.get("name") or error_body.get("code") or "")
+        error_code = str(error_body.get("statusCode") or error_body.get("status_code") or response.status_code)
         error_message = str(error_body.get("message") or "")
         logger.error(
             "[RESEND-SEND-ERROR] status=%s code=%s message=%s",
@@ -58,7 +59,7 @@ def send_otp_email(recipient: str, code: str) -> None:
             error_code[:80],
             error_message[:300],
         )
-        normalized_error = f"{error_code} {error_message}".lower()
+        normalized_error = f"{error_name} {error_message}".lower()
         if response.status_code == 401 or (
             response.status_code == 403 and "domain" not in normalized_error
         ):
@@ -73,7 +74,8 @@ def send_otp_email(recipient: str, code: str) -> None:
             detail = "Resend 发件人域名未验证或配置格式不正确"
         else:
             detail = f"Resend 邮件服务返回错误（HTTP {response.status_code}）"
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail)
+        detail = f"{detail}（Resend HTTP {error_code}; name={error_name or 'unknown'}; message={error_message or 'empty'}）"
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail[:1000])
     except HTTPException:
         raise
     except (httpx.HTTPError, ValueError) as exc:

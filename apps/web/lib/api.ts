@@ -36,15 +36,23 @@ export interface CaseStatus {
   job: GenerationJob | null;
 }
 
-const REQUEST_TIMEOUT_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 60_000;
 
-function withTimeout(init?: RequestInit): RequestInit {
+function withTimeout(init?: RequestInit): { request: RequestInit; cleanup: () => void } {
   const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  init?.signal?.addEventListener("abort", () => controller.abort(), { once: true });
+  const externalSignal = init?.signal;
+  const abortFromCaller = () => controller.abort(externalSignal?.reason);
+  const timer = window.setTimeout(
+    () => controller.abort(new DOMException("请求超过60秒未响应", "TimeoutError")),
+    REQUEST_TIMEOUT_MS,
+  );
+  externalSignal?.addEventListener("abort", abortFromCaller, { once: true });
   return {
-    ...init,
-    signal: controller.signal,
+    request: { ...init, signal: controller.signal },
+    cleanup: () => {
+      window.clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", abortFromCaller);
+    },
   };
 }
 
@@ -96,12 +104,14 @@ export interface CaseRecord {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, withTimeout({
+  const timed = withTimeout({
     credentials: "include",
     ...init,
     headers: init?.body instanceof FormData ? init.headers : { "Content-Type": "application/json", ...init?.headers },
-  }));
-  if (!response.ok) {
+  });
+  try {
+    const response = await fetch(path, timed.request);
+    if (!response.ok) {
     let message = "请求失败，请稍后重试";
     let body: any = null;
     try {
@@ -114,9 +124,12 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     error.status = response.status;
     error.body = body;
     throw error;
+    }
+    if (response.status === 204) return undefined as T;
+    return response.json() as Promise<T>;
+  } finally {
+    timed.cleanup();
   }
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
 }
 
 export function uploadEvidence(
