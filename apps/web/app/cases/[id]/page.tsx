@@ -49,6 +49,7 @@ export default function CaseWorkspacePage() {
   const [supplement, setSupplement] = useState("");
   const [reviewOpen, setReviewOpen] = useState(false);
   const reloadSeq = useRef(0);
+  const materialRun = useRef(false);
 
   async function reload(): Promise<CaseRecord | null> {
     const sequence = ++reloadSeq.current;
@@ -70,8 +71,6 @@ export default function CaseWorkspacePage() {
   useEffect(() => {
     let cancelled = false;
     let timer: number | undefined;
-    let backoff = 1500;
-    let last: CaseStatus | null = null;
 
     async function tick() {
       let status: CaseStatus | null = null;
@@ -84,11 +83,23 @@ export default function CaseWorkspacePage() {
           router.replace("/login");
           return;
         }
-        backoff = Math.min(backoff + 1000, 5000);
-        timer = window.setTimeout(tick, backoff);
+        timer = window.setTimeout(tick, 2000);
         return;
       }
       if (cancelled || !status) return;
+      const shouldRefreshMaterials = materialRun.current || status.materials_processing;
+      const fresh = shouldRefreshMaterials ? await reload() : null;
+      if (fresh) {
+        const processing = Boolean(fresh.evidence?.some((item) => item.status === "queued" || item.status === "processing"));
+        if (processing) {
+          materialRun.current = true;
+        } else if (materialRun.current) {
+          materialRun.current = false;
+          const failed = fresh.evidence?.find((item) => item.status === "failed");
+          if (failed) setMaterialNotice({ kind: "error", text: `${failed.original_name} 识别失败：${cleanModelText(failed.analysis?.error) || "请点击重试"}` });
+          else setMaterialNotice({ kind: "success", text: "材料识别完成，可以进入下一步生成文书。" });
+        }
+      }
       const job = status.job;
       if (job) {
         setBusy(true);
@@ -98,39 +109,14 @@ export default function CaseWorkspacePage() {
           setGeneration(null);
           setGenerationJobId(null);
           if (job.status === "failed") setError(job.error || "生成失败");
-          await reload();
           return;
         }
-      } else if (last?.job) {
-        setBusy(false);
-        setGeneration(null);
-        setGenerationJobId(null);
-        await reload();
-        return;
       }
-      const settled = last
-        ? (last.analysis_pending && !status.analysis_pending) || (last.materials_processing && !status.materials_processing)
-        : false;
       if (status.analysis_pending || status.materials_processing || job) {
-        if (settled) {
-          const fresh = await reload();
-          const failed = fresh?.evidence?.find((item) => item.status === "failed");
-          if (failed) setMaterialNotice({ kind: "error", text: `${failed.original_name} 识别失败：${cleanModelText(failed.analysis?.error) || "请点击重试"}` });
-          else if (fresh) setMaterialNotice({ kind: "success", text: "材料识别完成，可以进入下一步生成文书。" });
-        }
-        last = status;
-        backoff = Math.min(backoff + 1000, 5000);
-        timer = window.setTimeout(tick, backoff);
+        timer = window.setTimeout(tick, 2000);
         return;
       }
-      // A fast task may finish before the first status poll observes the
-      // processing state. Refresh once whenever the API reports an idle case
-      // so the details view cannot remain on a stale uploading card.
-      last = null;
-      const fresh = await reload();
-      const failed = fresh?.evidence?.find((item) => item.status === "failed");
-      if (failed) setMaterialNotice({ kind: "error", text: `${failed.original_name} 识别失败：${cleanModelText(failed.analysis?.error) || "请点击重试"}` });
-      else if (fresh) setMaterialNotice({ kind: "success", text: "材料识别完成，可以进入下一步生成文书。" });
+      if (materialRun.current) timer = window.setTimeout(tick, 2000);
     }
 
     void tick();
@@ -152,6 +138,7 @@ export default function CaseWorkspacePage() {
         const uploaded = await uploadEvidence(params.id, file, true, (progress) => {
           setUploads((current) => ({ ...current, [file.name]: progress }));
         });
+        materialRun.current = true;
         setMaterialNotice({ kind: "success", text: `${uploaded.original_name} 已上传，正在识别材料。` });
         setUploads((current) => { const next = { ...current }; delete next[file.name]; return next; });
         await reload();
