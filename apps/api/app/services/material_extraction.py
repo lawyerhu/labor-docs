@@ -33,6 +33,9 @@ HIGH_RISK_THRESHOLD = 0.55
 # Visual review is an enhancement step; keep it bounded so difficult scans
 # cannot hold the entire evidence job open indefinitely.
 MAX_VISION_REVIEW_PAGES = 3
+# Vision calls are network-bound. A small bound reduces wall-clock time while
+# avoiding a burst that can overwhelm the low-CPU generation service.
+VISION_CONCURRENCY = 2
 VISION_PROVIDER_TIMEOUT_SECONDS = 25
 VISION_PAGE_TIMEOUT_SECONDS = 45
 OCR_PAGE_TIMEOUT_SECONDS = 30
@@ -331,30 +334,42 @@ async def extract_material_with_vision(
     candidates = sorted(candidates, key=lambda page: page.number)
     reviewed: list[int] = []
     replacements: dict[int, str] = {}
-    for completed, page in enumerate(candidates, start=1):
-        if vision_progress_callback:
-            vision_progress_callback(completed, len(candidates))
-        try:
-            parsed = await asyncio.wait_for(vision_complete(
-                system="""你是中国劳动争议材料的页面视觉复核助手。结合页面图像与OCR文字纠错，只输出JSON。
+    semaphore = asyncio.Semaphore(VISION_CONCURRENCY)
+
+    async def review_page(page: ExtractedPage) -> tuple[int, str] | None:
+        async with semaphore:
+            try:
+                parsed = await asyncio.wait_for(vision_complete(
+                    system="""你是中国劳动争议材料的页面视觉复核助手。结合页面图像与OCR文字纠错，只输出JSON。
 corrected_text：按页面原有阅读顺序完整转写正文，保留姓名、日期、金额、案号、表格字段和签章文字；不得概括，不得补造看不清的内容。
 uncertain_fragments：仍无法确认的片段数组；notes：可选的简短说明。""",
-                user=f"这是第{page.number}页。OCR初稿如下，请以图像为准复核并与OCR结果合并：\n\n{page.text}",
-                image_bytes=page.image_bytes or b"",
-                mime_type=page.image_mime_type or "image/jpeg",
-                timeout=VISION_PROVIDER_TIMEOUT_SECONDS,
-                attempts=1,
-            ), timeout=VISION_PAGE_TIMEOUT_SECONDS)
-        except Exception as error:
-            logger.warning("[VISION-REVIEW-SKIPPED] page=%s reason=%s", page.number, error)
-            continue
-        corrected = str(parsed.get("corrected_text") or "").strip()
-        if corrected:
+                    user=f"这是第{page.number}页。OCR初稿如下，请以图像为准复核并与OCR结果合并：\n\n{page.text}",
+                    image_bytes=page.image_bytes or b"",
+                    mime_type=page.image_mime_type or "image/jpeg",
+                    timeout=VISION_PROVIDER_TIMEOUT_SECONDS,
+                    attempts=1,
+                ), timeout=VISION_PAGE_TIMEOUT_SECONDS)
+            except Exception as error:
+                logger.warning("[VISION-REVIEW-SKIPPED] page=%s reason=%s", page.number, error)
+                return None
+            corrected = str(parsed.get("corrected_text") or "").strip()
+            if not corrected:
+                return None
             uncertain = [str(value).strip() for value in parsed.get("uncertain_fragments") or [] if str(value).strip()]
             if uncertain:
                 corrected += "\n[待核实：" + "；".join(uncertain[:10]) + "]"
-            replacements[page.number] = corrected
-            reviewed.append(page.number)
+            return page.number, corrected
+
+    review_results = await asyncio.gather(*(review_page(page) for page in candidates))
+    for completed, result in enumerate(review_results, start=1):
+        if vision_progress_callback:
+            vision_progress_callback(completed, len(candidates))
+        if result is None:
+            continue
+        page_number, corrected = result
+        replacements[page_number] = corrected
+        reviewed.append(page_number)
+    reviewed.sort()
 
     merged_pages = [
         ExtractedPage(
