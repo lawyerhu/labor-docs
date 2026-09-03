@@ -48,6 +48,7 @@ from app.services.remote_generation import (
     RemoteGenerationError,
     _s3_stored_path,
     fetch_worker_generation_input,
+    report_evidence_analysis_result,
     report_generation_result,
     run_remote_generation,
 )
@@ -83,6 +84,33 @@ async def _process_internal_generation_job(payload: InternalGenerationJobInput) 
             )
         except Exception:
             logger.exception("[GENERATION-CALLBACK-ERROR] failed to report generation failure")
+
+
+async def _process_internal_evidence_analysis(payload: InternalEvidenceAnalysisInput) -> None:
+    processing_path = None
+    try:
+        worker_payload = await fetch_worker_generation_input(payload.case_id)
+        case = worker_payload.get("case") or {}
+        item = next((value for value in worker_payload.get("evidence") or [] if value.get("id") == payload.evidence_id), None)
+        if not item:
+            raise RemoteGenerationError("证据不存在")
+        processing_path = await asyncio.to_thread(
+            materialize_for_processing,
+            _s3_stored_path(str(item.get("object_key") or "")),
+            payload.case_id,
+            payload.evidence_id,
+        )
+        result = await analyze_material(case=case, item=item, path=processing_path)
+        await report_evidence_analysis_result(payload.case_id, payload.evidence_id, result=result)
+    except Exception as exc:
+        logger.exception("[EVIDENCE-ANALYSIS-ERROR] background analysis failure")
+        try:
+            await report_evidence_analysis_result(payload.case_id, payload.evidence_id, error=str(exc) or type(exc).__name__)
+        except Exception:
+            logger.exception("[EVIDENCE-CALLBACK-ERROR] failed to report evidence failure")
+    finally:
+        if processing_path is not None:
+            delete_if_managed(str(processing_path))
 
 
 def _aware(value: datetime) -> datetime:
@@ -247,37 +275,14 @@ def create_app() -> FastAPI:
     @app.post("/internal/evidence-analysis", include_in_schema=False)
     async def internal_evidence_analysis(
         payload: InternalEvidenceAnalysisInput,
+        background_tasks: BackgroundTasks,
         authorization: str | None = Header(default=None),
     ):
         expected = settings.generator_internal_token
         if not expected or not secrets.compare_digest(authorization or "", f"Bearer {expected}"):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未授权")
-        processing_path = None
-        try:
-            worker_payload = await fetch_worker_generation_input(payload.case_id)
-            case = worker_payload.get("case") or {}
-            item = next(
-                (value for value in worker_payload.get("evidence") or [] if value.get("id") == payload.evidence_id),
-                None,
-            )
-            if not item:
-                raise RemoteGenerationError("证据不存在")
-            object_key = str(item.get("object_key") or "")
-            processing_path = await asyncio.to_thread(
-                materialize_for_processing,
-                _s3_stored_path(object_key),
-                payload.case_id,
-                payload.evidence_id,
-            )
-            return await analyze_material(case=case, item=item, path=processing_path)
-        except RemoteGenerationError as exc:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
-        except Exception as exc:
-            logger.exception("[EVIDENCE-ANALYSIS-ERROR]")
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "材料读取或分析失败") from exc
-        finally:
-            if processing_path is not None:
-                delete_if_managed(str(processing_path))
+        background_tasks.add_task(_process_internal_evidence_analysis, payload)
+        return {"status": "accepted", "case_id": payload.case_id, "evidence_id": payload.evidence_id}
 
     @app.post("/internal/case-analysis", include_in_schema=False)
     async def internal_case_analysis(

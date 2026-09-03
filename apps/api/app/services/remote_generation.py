@@ -96,6 +96,38 @@ async def _cache_extracted_text(case_id: str, evidence_id: str, analysis: dict[s
         return
 
 
+async def report_evidence_analysis_result(
+    case_id: str,
+    evidence_id: str,
+    *,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    settings = get_settings()
+    worker_url = (settings.worker_internal_url or "").rstrip("/")
+    if not worker_url:
+        raise RemoteGenerationError("Worker internal URL is not configured")
+    headers = {"Content-Type": "application/json"}
+    if settings.worker_internal_token:
+        headers["X-Internal-Token"] = settings.worker_internal_token
+    payload: dict[str, Any] = {
+        "case_id": case_id,
+        "status": "completed" if result is not None else "failed",
+    }
+    if result is not None:
+        payload["result"] = result
+    else:
+        payload["error"] = (error or "Evidence analysis failed")[:1000]
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        response = await client.post(
+            f"{worker_url}/api/internal/cases/{quote(case_id, safe='')}/evidence/{quote(evidence_id, safe='')}/analysis-result",
+            headers=headers,
+            json=payload,
+        )
+    if response.status_code != 200:
+        raise RemoteGenerationError(f"Worker evidence result endpoint returned {response.status_code}")
+
+
 async def _report_progress(job_id: str, stage: str, progress: int) -> None:
     settings = get_settings()
     worker_url = (settings.worker_internal_url or "").rstrip("/")

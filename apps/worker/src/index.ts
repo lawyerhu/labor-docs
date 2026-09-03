@@ -882,6 +882,9 @@ async function getCaseStatus(request: Request, env: Env, caseId: string): Promis
   const owned = await ownedCase(request, env, caseId);
   if (owned instanceof Response) return owned;
   const row = owned.row;
+  // Recover abandoned evidence jobs during polling so the UI can leave the
+  // processing state without requiring a manual page refresh.
+  await recoverStaleEvidence(env, caseId);
   const data = parseCaseData(row.data_json);
   const analysis = data.analysis && typeof data.analysis === "object"
     ? data.analysis as Record<string, unknown>
@@ -1258,6 +1261,29 @@ async function cacheEvidenceAnalysis(request: Request, env: Env, caseId: string,
   await env.DB.prepare("UPDATE evidence SET analysis_json = ? WHERE id = ? AND case_id = ?")
     .bind(JSON.stringify(merged), evidenceId, caseId)
     .run();
+  return json({ status: "ok" });
+}
+
+async function receiveEvidenceAnalysisResult(request: Request, env: Env, caseId: string, evidenceId: string): Promise<Response> {
+  if (!isAuthorized(request, env)) return json({ detail: "未授权" }, { status: 401 });
+  let body: { status?: unknown; result?: any; error?: unknown };
+  try { body = await request.json() as typeof body; } catch { return json({ detail: "请求体必须是 JSON" }, { status: 400 }); }
+  if (body.status === "failed") {
+    const error = String(body.error || "材料读取或分析失败").slice(0, 1000);
+    await env.DB.batch([
+      env.DB.prepare("UPDATE evidence SET status = 'failed', processing_stage = 'failed', processing_progress = 100, analysis_json = ? WHERE id = ? AND case_id = ?").bind(JSON.stringify({ error }), evidenceId, caseId),
+      env.DB.prepare("UPDATE cases SET status = CASE WHEN NOT EXISTS (SELECT 1 FROM evidence WHERE case_id = ? AND status IN ('queued', 'processing')) THEN 'ready_to_generate' ELSE status END WHERE id = ?").bind(caseId, caseId),
+    ]);
+    return json({ status: "ok" });
+  }
+  const result = body.result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return json({ detail: "分析结果无效" }, { status: 400 });
+  const name = typeof result.name === "string" ? result.name.trim().slice(0, 255) : "材料";
+  const purpose = typeof result.purpose === "string" ? result.purpose.trim().slice(0, 2000) : "[待核实证明目的]";
+  await env.DB.batch([
+    env.DB.prepare("UPDATE evidence SET name = ?, purpose = ?, status = 'ready', processing_stage = 'complete', processing_progress = 100, analysis_json = ? WHERE id = ? AND case_id = ?").bind(name || "材料", purpose, JSON.stringify(result.analysis || {}), evidenceId, caseId),
+    env.DB.prepare("UPDATE cases SET status = CASE WHEN NOT EXISTS (SELECT 1 FROM evidence WHERE case_id = ? AND status IN ('queued', 'processing') AND id <> ?) THEN 'ready_to_generate' ELSE status END WHERE id = ?").bind(caseId, evidenceId, caseId),
+  ]);
   return json({ status: "ok" });
 }
 
@@ -1648,6 +1674,11 @@ async function dispatchEvidenceAnalysis(message: Message<EvidenceAnalysisMessage
     await retryOrFail(`分析服务返回 ${response.status}`);
     return;
   }
+  if (response.status === 202) {
+    // Render accepted the work and will report completion asynchronously.
+    message.ack();
+    return;
+  }
   let result: { name?: unknown; purpose?: unknown; analysis?: unknown };
   try {
     result = await response.json() as typeof result;
@@ -2036,6 +2067,11 @@ export default {
         decodeURIComponent(evidenceAnalysisMatch[1]),
         decodeURIComponent(evidenceAnalysisMatch[2]),
       );
+    }
+
+    const evidenceAnalysisResultMatch = url.pathname.match(/^\/api\/internal\/cases\/([^/]+)\/evidence\/([^/]+)\/analysis-result$/);
+    if (request.method === "POST" && evidenceAnalysisResultMatch) {
+      return receiveEvidenceAnalysisResult(request, env, decodeURIComponent(evidenceAnalysisResultMatch[1]), decodeURIComponent(evidenceAnalysisResultMatch[2]));
     }
 
     return json({ detail: "Cloudflare Worker API迁移中" }, { status: 501 });
