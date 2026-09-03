@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from math import sqrt
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import Any, Awaitable, Callable
 import pypdfium2 as pdfium
 import pytesseract
 from docx import Document
-from PIL import Image
+from PIL import Image, ImageOps
 from pypdf import PdfReader
 
 from app.config import get_settings
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 MAX_EXTRACTED_CHARS = 120_000
 DEFAULT_OCR_RENDER_SCALE = 2.2
+MAX_IMAGE_EDGE = 3200
 FAST_OCR_RENDER_PIXELS = 800_000
 MAX_OCR_RENDER_PIXELS = 2_000_000
 MIN_USEFUL_OCR_CHARS = 40
@@ -54,6 +56,12 @@ class ExtractedPage:
     used_ocr: bool
     image_bytes: bytes | None = None
     image_mime_type: str | None = None
+    method: str = "native_text"
+    quality_score: float | None = None
+    retry_count: int = 0
+    processing_time_ms: int = 0
+    success: bool = True
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +69,26 @@ class MaterialExtractionResult:
     text: str
     page_count: int
     vision_reviewed_pages: tuple[int, ...]
+    pages: tuple[ExtractedPage, ...] = ()
+    document_mode: str = "native"
+
+
+def evaluate_recognition_quality(text: str, *, used_ocr: bool, confidence: float | None = None) -> float:
+    """Score recognized text without silently correcting its content."""
+    compact = re.sub(r"\s+", "", text or "")
+    if not compact:
+        return 0.0
+    useful = sum(character.isalnum() or "\u4e00" <= character <= "\u9fff" for character in compact)
+    useful_ratio = useful / max(len(compact), 1)
+    score = min(len(compact) / 240, 1.0) * 0.45 + useful_ratio * 0.4
+    if used_ocr:
+        score += 0.05
+    if confidence is not None:
+        score = score * 0.7 + max(0.0, min(confidence, 1.0)) * 0.3
+    score -= compact.count("�") / max(len(compact), 1) * 0.7
+    if re.search(r"([^\w\u4e00-\u9fff])\1{4,}", compact):
+        score -= 0.2
+    return round(max(0.0, min(score, 1.0)), 2)
 
 
 def _ocr_image(image: Image.Image) -> str:
@@ -115,7 +143,9 @@ def _render_pdf_page(pdf_page: pdfium.PdfPage, max_pixels: int) -> Image.Image:
 
 
 def _image_as_jpeg(image: Image.Image) -> bytes:
-    scale = _bounded_ocr_scale(image.width, image.height, MAX_OCR_RENDER_PIXELS)
+    edge_scale = min(1.0, MAX_IMAGE_EDGE / max(image.width, image.height))
+    pixel_scale = _bounded_ocr_scale(image.width, image.height, MAX_OCR_RENDER_PIXELS)
+    scale = min(edge_scale, pixel_scale)
     source = image
     if scale < 1:
         source = image.resize((max(1, int(image.width * scale)), max(1, int(image.height * scale))))
@@ -158,6 +188,13 @@ def _adaptive_ocr_text(first_pass: str, retry: Callable[[], str]) -> str:
     return retry_text if len(retry_text) > len(first_pass) else first_pass
 
 
+def _native_text_is_reliable(text: str, image_count: int) -> bool:
+    compact = re.sub(r"\s+", "", text or "")
+    if image_count and len(compact) < 80:
+        return False
+    return len(compact) >= MIN_USEFUL_OCR_CHARS and evaluate_recognition_quality(text, used_ocr=False) >= 0.55
+
+
 def _extract_pdf_pages(path: Path, progress_callback: ExtractionProgress | None = None) -> list[ExtractedPage]:
     reader = PdfReader(path)
     native_texts = [(page.extract_text() or "").strip() for page in reader.pages]
@@ -167,6 +204,7 @@ def _extract_pdf_pages(path: Path, progress_callback: ExtractionProgress | None 
         try:
             total = len(native_texts)
             for index, native_text in enumerate(native_texts):
+                page_started = time.perf_counter()
                 if progress_callback:
                     progress_callback(index + 1, total)
                 text = native_text
@@ -174,8 +212,13 @@ def _extract_pdf_pages(path: Path, progress_callback: ExtractionProgress | None 
                 image_bytes: bytes | None = None
                 pdf_page: pdfium.PdfPage | None = None
                 rendered: Image.Image | None = None
+                retry_count = 0
+                try:
+                    image_count = len(reader.pages[index].images)
+                except Exception:
+                    image_count = 0
                 native_risk = assess_page_risk(native_text, used_ocr=False)
-                needs_ocr = len(native_text) < MIN_USEFUL_OCR_CHARS or native_risk >= HIGH_RISK_THRESHOLD
+                needs_ocr = not _native_text_is_reliable(native_text, image_count)
                 try:
                     if needs_ocr:
                         pdf_page = document[index]
@@ -183,6 +226,7 @@ def _extract_pdf_pages(path: Path, progress_callback: ExtractionProgress | None 
                         first_pass = _ocr_image(rendered)
                         selected_image = rendered
                         if len(first_pass) < MIN_USEFUL_OCR_CHARS:
+                            retry_count = 1
                             retry_image = _render_pdf_page(pdf_page, MAX_OCR_RENDER_PIXELS)
                             retry_text = _ocr_image(retry_image)
                             if len(retry_text) > len(first_pass):
@@ -212,6 +256,10 @@ def _extract_pdf_pages(path: Path, progress_callback: ExtractionProgress | None 
                             used_ocr=used_ocr,
                             image_bytes=image_bytes,
                             image_mime_type="image/jpeg" if image_bytes else None,
+                            method=("recognition_enhanced" if retry_count else "recognition_fast") if used_ocr else "native_text",
+                            quality_score=evaluate_recognition_quality(text, used_ocr=used_ocr),
+                            retry_count=retry_count,
+                            processing_time_ms=round((time.perf_counter() - page_started) * 1000),
                         )
                     )
                 finally:
@@ -277,18 +325,21 @@ def extract_material_pages(path: Path, progress_callback: ExtractionProgress | N
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         return _extract_pdf_pages(path, progress_callback)
-    if suffix in {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}:
+    if suffix in {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"}:
         if progress_callback:
             progress_callback(1, 1)
-        with Image.open(path) as image:
+        with Image.open(path) as source:
+            image = ImageOps.exif_transpose(source)
             width, height = image.size
             fast_scale = _bounded_ocr_scale(width, height, FAST_OCR_RENDER_PIXELS)
+            retry_count = 0
             if fast_scale < 1:
                 fast = image.resize((max(1, int(width * fast_scale)), max(1, int(height * fast_scale))))
                 retry_scale = _bounded_ocr_scale(width, height, MAX_OCR_RENDER_PIXELS)
                 try:
                     first_pass = _ocr_image(fast)
                     retry_text = _ocr_resized(image, retry_scale) if len(first_pass) < MIN_USEFUL_OCR_CHARS else ""
+                    retry_count = 1 if retry_text else 0
                     text = retry_text if len(retry_text) > len(first_pass) else first_pass
                 finally:
                     fast.close()
@@ -303,6 +354,9 @@ def extract_material_pages(path: Path, progress_callback: ExtractionProgress | N
                     used_ocr=True,
                     image_bytes=_image_as_jpeg(image) if risk_score >= HIGH_RISK_THRESHOLD else None,
                     image_mime_type="image/jpeg" if risk_score >= HIGH_RISK_THRESHOLD else None,
+                    method="recognition_enhanced" if retry_count else "recognition_fast",
+                    quality_score=evaluate_recognition_quality(text, used_ocr=True),
+                    retry_count=retry_count,
                 )
             ]
     if suffix == ".docx":
@@ -383,10 +437,17 @@ uncertain_fragments：仍无法确认的片段数组；notes：可选的简短�
     normalized = "\n".join(line.rstrip() for line in _pages_text(merged_pages).splitlines()).strip()
     if not normalized or not any(page.text.strip() for page in merged_pages):
         raise RuntimeError("材料中未识别到可读文字")
+    native_count = sum(page.method == "native_text" for page in merged_pages)
+    recognized_count = len(merged_pages) - native_count
+    document_mode = "image" if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"} else (
+        "native" if recognized_count == 0 else "scanned" if native_count == 0 else "hybrid"
+    )
     return MaterialExtractionResult(
         text=normalized[:MAX_EXTRACTED_CHARS],
         page_count=len(merged_pages),
         vision_reviewed_pages=tuple(reviewed),
+        pages=tuple(merged_pages),
+        document_mode=document_mode,
     )
 
 
