@@ -41,6 +41,7 @@ export default function CaseWorkspacePage() {
   const [record, setRecord] = useState<CaseRecord | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [materialNotice, setMaterialNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [uploads, setUploads] = useState<Record<string, number>>({});
   const [generation, setGeneration] = useState<{ stage: string; progress: number } | null>(null);
   const [generationJobId, setGenerationJobId] = useState<string | null>(null);
@@ -49,16 +50,18 @@ export default function CaseWorkspacePage() {
   const [reviewOpen, setReviewOpen] = useState(false);
   const reloadSeq = useRef(0);
 
-  async function reload() {
+  async function reload(): Promise<CaseRecord | null> {
     const sequence = ++reloadSeq.current;
     try {
       const fresh = await api<CaseRecord>(`/api/cases/${params.id}`);
       if (sequence === reloadSeq.current) setRecord(fresh);
+      return fresh;
     } catch (reason) {
-      if (sequence !== reloadSeq.current) return;
+      if (sequence !== reloadSeq.current) return null;
       const typed = reason as Error & { status?: number };
       if (typed.status === 401) router.replace("/login");
       else setError(typed.message);
+      return null;
     }
   }
 
@@ -109,7 +112,12 @@ export default function CaseWorkspacePage() {
         ? (last.analysis_pending && !status.analysis_pending) || (last.materials_processing && !status.materials_processing)
         : false;
       if (status.analysis_pending || status.materials_processing || job) {
-        if (settled) await reload();
+        if (settled) {
+          const fresh = await reload();
+          const failed = fresh?.evidence?.find((item) => item.status === "failed");
+          if (failed) setMaterialNotice({ kind: "error", text: `${failed.original_name} 识别失败：${cleanModelText(failed.analysis?.error) || "请点击重试"}` });
+          else if (fresh) setMaterialNotice({ kind: "success", text: "材料识别完成，可以进入下一步生成文书。" });
+        }
         last = status;
         backoff = Math.min(backoff + 1000, 5000);
         timer = window.setTimeout(tick, backoff);
@@ -119,7 +127,10 @@ export default function CaseWorkspacePage() {
       // processing state. Refresh once whenever the API reports an idle case
       // so the details view cannot remain on a stale uploading card.
       last = null;
-      await reload();
+      const fresh = await reload();
+      const failed = fresh?.evidence?.find((item) => item.status === "failed");
+      if (failed) setMaterialNotice({ kind: "error", text: `${failed.original_name} 识别失败：${cleanModelText(failed.analysis?.error) || "请点击重试"}` });
+      else if (fresh) setMaterialNotice({ kind: "success", text: "材料识别完成，可以进入下一步生成文书。" });
     }
 
     void tick();
@@ -138,9 +149,10 @@ export default function CaseWorkspacePage() {
     try {
       for (const file of Array.from(files)) {
         setUploads((current) => ({ ...current, [file.name]: 1 }));
-        await uploadEvidence(params.id, file, true, (progress) => {
+        const uploaded = await uploadEvidence(params.id, file, true, (progress) => {
           setUploads((current) => ({ ...current, [file.name]: progress }));
         });
+        setMaterialNotice({ kind: "success", text: `${uploaded.original_name} 已上传，正在识别材料。` });
         setUploads((current) => { const next = { ...current }; delete next[file.name]; return next; });
         await reload();
       }
@@ -337,6 +349,7 @@ export default function CaseWorkspacePage() {
       <div className="evidence-card">
         <div><div className="eyebrow"><span /> 材料识别</div><h2>上传你实际持有的材料</h2><p>大模型阅读内容后命名材料，生成时会结合全案编排证据目录；随后按连续页码统一排版。</p></div>
         <button className="upload-zone" onClick={() => fileRef.current?.click()} disabled={busy}><UploadCloud size={25} /><strong>选择材料</strong><span>PDF、图片、Word、Excel；单个不超过 50MB</span><input ref={fileRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx" onChange={(event) => uploadFiles(event.target.files)} hidden /></button>
+        {materialNotice && <div className={`notice notice-${materialNotice.kind}`} role="status"><AlertCircle size={17} />{materialNotice.text}<button onClick={() => setMaterialNotice(null)}>关闭</button></div>}
         {Object.entries(uploads).map(([name, progress]) => <ProgressBlock key={name} label={`正在上传：${name}`} progress={progress} />)}
         {!record.evidence?.length
           ? <div className="empty-evidence"><Paperclip size={20} /><span>可以不上传材料；系统仍会依据现有说明生成含待填项的正式稿。</span></div>
