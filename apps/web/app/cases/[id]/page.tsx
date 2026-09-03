@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertCircle, ArrowLeft, Download, FileText, ListChecks, LoaderCircle, Paperclip, RefreshCw, Send, ShieldCheck, Sparkles, Trash2, UploadCloud } from "lucide-react";
+import { AlertCircle, ArrowLeft, CheckCircle, Download, FileText, ListChecks, LoaderCircle, Paperclip, RefreshCw, Send, ShieldCheck, Sparkles, Trash2, UploadCloud } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -41,15 +41,22 @@ export default function CaseWorkspacePage() {
   const [record, setRecord] = useState<CaseRecord | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
   const [materialNotice, setMaterialNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [uploads, setUploads] = useState<Record<string, number>>({});
   const [generation, setGeneration] = useState<{ stage: string; progress: number } | null>(null);
-  const [generationJobId, setGenerationJobId] = useState<string | null>(null);
+  const [trackingVersion, setTrackingVersion] = useState(0);
   const [analysisBusy, setAnalysisBusy] = useState(false);
   const [supplement, setSupplement] = useState("");
   const [reviewOpen, setReviewOpen] = useState(false);
   const reloadSeq = useRef(0);
-  const materialRun = useRef(false);
+  const materialRun = useRef<Set<string>>(new Set());
+  const analysisRun = useRef(false);
+  const generationRun = useRef<string | null>(null);
+
+  function startTracking() {
+    setTrackingVersion((current) => current + 1);
+  }
 
   async function reload(): Promise<CaseRecord | null> {
     const sequence = ++reloadSeq.current;
@@ -70,76 +77,117 @@ export default function CaseWorkspacePage() {
 
   useEffect(() => {
     let cancelled = false;
-    let timer: number | undefined;
+    let source: EventSource | null = null;
+    let fallbackTimer: number | undefined;
 
-    async function tick() {
-      let status: CaseStatus | null = null;
+    async function applyStatus(status: CaseStatus) {
+      if (cancelled) return;
+      const materials = status.materials || [];
+      const activeMaterials = materials.filter((item) => item.status === "queued" || item.status === "processing");
+      activeMaterials.forEach((item) => materialRun.current.add(item.id));
+      if (!activeMaterials.length && materialRun.current.size > 0) {
+        const completedIds = new Set(materialRun.current);
+        materialRun.current.clear();
+        const failed = materials.find((item) => completedIds.has(item.id) && item.status === "failed");
+        await reload();
+        if (failed) {
+          setMaterialNotice({ kind: "error", text: `材料识别失败：${cleanModelText(failed.error) || "请点击重试"}` });
+        } else {
+          setMaterialNotice({ kind: "success", text: "材料识别完成，可以进入下一步生成文书。" });
+          window.setTimeout(() => document.getElementById("generation-review")?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
+        }
+      }
+
+      if (status.analysis_pending) {
+        analysisRun.current = true;
+      } else if (analysisRun.current) {
+        analysisRun.current = false;
+        await reload();
+        setSuccess("案情分析完成，可以继续核对材料和诉请。");
+      }
+
+      const job = status.job;
+      if (job && job.status !== "completed" && job.status !== "failed") {
+        generationRun.current = job.id;
+        setBusy(true);
+        setGeneration({ stage: generationStageLabels[job.stage] || job.stage || "正在处理", progress: job.progress || 5 });
+      } else if (job && generationRun.current === job.id) {
+        generationRun.current = null;
+        setBusy(false);
+        setGeneration(null);
+        if (job.status === "failed") {
+          setSuccess("");
+          setError(job.error || "生成失败");
+        } else {
+          setSuccess("文书生成完成，可以下载文件。");
+        }
+        await reload();
+      }
+    }
+
+    async function refreshStatus() {
       try {
-        status = await api<CaseStatus>(`/api/cases/${params.id}/status`);
+        const status = await api<CaseStatus>(`/api/cases/${params.id}/status`);
+        await applyStatus(status);
       } catch (reason) {
         if (cancelled) return;
         const typed = reason as Error & { status?: number };
-        if (typed.status === 401) {
-          router.replace("/login");
-          return;
-        }
-        timer = window.setTimeout(tick, 2000);
-        return;
+        if (typed.status === 401) router.replace("/login");
       }
-      if (cancelled || !status) return;
-      const shouldRefreshMaterials = materialRun.current || status.materials_processing;
-      const fresh = shouldRefreshMaterials ? await reload() : null;
-      if (fresh) {
-        const processing = Boolean(fresh.evidence?.some((item) => item.status === "queued" || item.status === "processing"));
-        if (processing) {
-          materialRun.current = true;
-        } else if (materialRun.current) {
-          materialRun.current = false;
-          const failed = fresh.evidence?.find((item) => item.status === "failed");
-          if (failed) setMaterialNotice({ kind: "error", text: `${failed.original_name} 识别失败：${cleanModelText(failed.analysis?.error) || "请点击重试"}` });
-          else setMaterialNotice({ kind: "success", text: "材料识别完成，可以进入下一步生成文书。" });
-        }
-      }
-      const job = status.job;
-      if (job) {
-        setBusy(true);
-        setGeneration({ stage: generationStageLabels[job.stage] || job.stage || "正在处理", progress: job.progress || 5 });
-        if (job.status === "failed" || job.status === "completed") {
-          setBusy(false);
-          setGeneration(null);
-          setGenerationJobId(null);
-          if (job.status === "failed") setError(job.error || "生成失败");
-          return;
-        }
-      }
-      if (status.analysis_pending || status.materials_processing || job) {
-        timer = window.setTimeout(tick, 2000);
-        return;
-      }
-      if (materialRun.current) timer = window.setTimeout(tick, 2000);
     }
 
-    void tick();
+    function startFallback() {
+      if (fallbackTimer !== undefined) return;
+      fallbackTimer = window.setInterval(() => { void refreshStatus(); }, 20_000);
+    }
+
+    source = new EventSource(`/api/cases/${params.id}/events`);
+    source.onopen = () => {
+      if (fallbackTimer !== undefined) {
+        window.clearInterval(fallbackTimer);
+        fallbackTimer = undefined;
+      }
+    };
+    source.addEventListener("status", (event) => {
+      try {
+        void applyStatus(JSON.parse((event as MessageEvent).data) as CaseStatus);
+      } catch {
+        startFallback();
+      }
+    });
+    source.addEventListener("idle", () => source?.close());
+    source.addEventListener("failure", (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent).data) as { detail?: string };
+        setError(payload.detail || "状态连接失败，请稍后重试");
+      } catch {
+        setError("状态连接失败，请稍后重试");
+      }
+      source?.close();
+    });
+    source.onerror = () => startFallback();
     return () => {
       cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
+      source?.close();
+      if (fallbackTimer !== undefined) window.clearInterval(fallbackTimer);
     };
-  }, [params.id, generationJobId, router]);
+  }, [params.id, router, trackingVersion]);
 
   const materialProcessing = Boolean(record?.evidence?.some((item) => item.status === "queued" || item.status === "processing"));
   const analysisPending = record?.data?.analysis?.status === "pending";
 
   async function uploadFiles(files: FileList | null) {
     if (!files?.length) return;
-    setBusy(true); setError("");
+    setBusy(true); setError(""); setSuccess("");
     try {
       for (const file of Array.from(files)) {
         setUploads((current) => ({ ...current, [file.name]: 1 }));
         const uploaded = await uploadEvidence(params.id, file, true, (progress) => {
           setUploads((current) => ({ ...current, [file.name]: progress }));
         });
-        materialRun.current = true;
+        materialRun.current.add(uploaded.id);
         setMaterialNotice({ kind: "success", text: `${uploaded.original_name} 已上传，正在识别材料。` });
+        startTracking();
         setUploads((current) => { const next = { ...current }; delete next[file.name]; return next; });
         await reload();
       }
@@ -163,12 +211,14 @@ export default function CaseWorkspacePage() {
   }
 
   async function analyzeCase(message = "请重新分析案情和诉请，指出确有必要补充的信息，并结合类案整理建议提交的证据。") {
-    setAnalysisBusy(true); setBusy(true); setError("");
+    setAnalysisBusy(true); setBusy(true); setError(""); setSuccess("");
     try {
       await api(`/api/cases/${params.id}/chat`, {
         method: "POST",
         body: JSON.stringify({ message, consent_cloud_processing: true }),
       });
+      analysisRun.current = true;
+      startTracking();
       await reload();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "案件分析失败，请稍后重试");
@@ -201,7 +251,7 @@ export default function CaseWorkspacePage() {
 
   async function generate() {
     let trackingStarted = false;
-    setBusy(true); setError(""); setGeneration({ stage: "正在创建生成任务", progress: 3 });
+    setBusy(true); setError(""); setSuccess(""); setGeneration({ stage: "正在创建生成任务", progress: 3 });
     try {
       const result = await api<{ artifacts?: Artifact[]; job_id?: string }>(`/api/cases/${params.id}/generate`, {
         method: "POST",
@@ -210,7 +260,8 @@ export default function CaseWorkspacePage() {
       });
       if (result.job_id) {
         trackingStarted = true;
-        setGenerationJobId(result.job_id);
+        generationRun.current = result.job_id;
+        startTracking();
         return;
       }
       await reload();
@@ -228,7 +279,8 @@ export default function CaseWorkspacePage() {
         if (active) {
           trackingStarted = true;
           setGeneration({ stage: generationStageLabels[active.stage] || active.stage || "正在处理", progress: active.progress || 5 });
-          setGenerationJobId(active.id);
+          generationRun.current = active.id;
+          startTracking();
           return;
         }
       }
@@ -257,12 +309,15 @@ export default function CaseWorkspacePage() {
   }
 
   async function retryEvidence(item: EvidenceItem) {
-    setBusy(true); setError("");
+    setBusy(true); setError(""); setSuccess("");
     try {
       await api(`/api/cases/${params.id}/evidence/${item.id}/retry`, {
         method: "POST",
         body: JSON.stringify({ consent_cloud_processing: true }),
       });
+      materialRun.current.add(item.id);
+      setMaterialNotice({ kind: "success", text: `${item.original_name} 已重新提交，正在识别材料。` });
+      startTracking();
       await reload();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "重试失败，请稍后重试");
@@ -314,6 +369,7 @@ export default function CaseWorkspacePage() {
     <header className="setup-header"><Link href="/dashboard" className="text-link"><ArrowLeft size={17} /> 返回案件</Link><strong>{record.title}</strong><button className="icon-button danger" onClick={deleteCase} disabled={busy} aria-label="删除案件"><Trash2 size={17} /></button></header>
     <section className="linear-content">
       {error && <div className="notice notice-error"><AlertCircle size={17} />{error}<button onClick={() => setError("")}>关闭</button></div>}
+      {success && <div className="notice notice-success" role="status"><CheckCircle size={17} />{success}<button onClick={() => setSuccess("")}>关闭</button></div>}
 
       <div className="analysis-card">
         <div className="eyebrow"><span /> 案情与证据分析</div>
@@ -336,7 +392,7 @@ export default function CaseWorkspacePage() {
       <div className="evidence-card">
         <div><div className="eyebrow"><span /> 材料识别</div><h2>上传你实际持有的材料</h2><p>大模型阅读内容后命名材料，生成时会结合全案编排证据目录；随后按连续页码统一排版。</p></div>
         <button className="upload-zone" onClick={() => fileRef.current?.click()} disabled={busy}><UploadCloud size={25} /><strong>选择材料</strong><span>PDF、图片、Word、Excel；单个不超过 50MB</span><input ref={fileRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx" onChange={(event) => uploadFiles(event.target.files)} hidden /></button>
-        {materialNotice && <div className={`notice notice-${materialNotice.kind}`} role="status"><AlertCircle size={17} />{materialNotice.text}<button onClick={() => setMaterialNotice(null)}>关闭</button></div>}
+        {materialNotice && <div className={`notice notice-${materialNotice.kind}`} role="status">{materialNotice.kind === "success" ? <CheckCircle size={17} /> : <AlertCircle size={17} />}{materialNotice.text}<button onClick={() => setMaterialNotice(null)}>关闭</button></div>}
         {Object.entries(uploads).map(([name, progress]) => <ProgressBlock key={name} label={`正在上传：${name}`} progress={progress} />)}
         {!record.evidence?.length
           ? <div className="empty-evidence"><Paperclip size={20} /><span>可以不上传材料；系统仍会依据现有说明生成含待填项的正式稿。</span></div>
@@ -413,7 +469,7 @@ function GenerationReviewCard({ record, busy, open, generation, onGenerate, onDo
   const includedCount = manifest.filter((row) => row.included).length;
   const generationBlocked = (record.access_status === "locked" && !record.unlimited_generation)
     || (!record.unlimited_generation && record.generation_count >= 3);
-  return <section className={`review-card ${needsConfirmation ? "pending" : "complete"}`}>
+  return <section id="generation-review" className={`review-card ${needsConfirmation ? "pending" : "complete"}`}>
     <div className="review-heading" onClick={() => setExpanded((value) => !value)} role="button" tabIndex={0}>
       <ShieldCheck size={19} />
       <div><div className="eyebrow"><span /> 生成前核对</div><h2>{needsConfirmation ? "请核对案情、诉请与证据清单" : "已核对，可以直接生成"}</h2><p>{needsConfirmation ? "案情、诉请或材料最近有更新，需要重新确认后才开始生成。" : `共 ${manifest.length} 份材料、${includedCount} 份纳入证据目录；确认后可立即生成。`}</p></div>

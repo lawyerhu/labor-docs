@@ -33,6 +33,13 @@ export interface CaseStatus {
   analysis_pending: boolean;
   analysis_status: string;
   materials_processing: boolean;
+  materials: Array<{
+    id: string;
+    status: string;
+    processing_stage: string;
+    processing_progress: number;
+    error?: string;
+  }>;
   job: GenerationJob | null;
 }
 

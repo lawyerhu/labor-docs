@@ -869,6 +869,13 @@ type CaseStatusPayload = {
   analysis_pending: boolean;
   analysis_status: string;
   materials_processing: boolean;
+  materials: Array<{
+    id: string;
+    status: string;
+    processing_stage: string;
+    processing_progress: number;
+    error?: string;
+  }>;
   job: {
     id: string;
     status: string;
@@ -878,33 +885,127 @@ type CaseStatusPayload = {
   } | null;
 };
 
-async function getCaseStatus(request: Request, env: Env, caseId: string): Promise<Response> {
-  const owned = await ownedCase(request, env, caseId);
-  if (owned instanceof Response) return owned;
-  const row = owned.row;
-  // Recover abandoned evidence jobs during polling so the UI can leave the
-  // processing state without requiring a manual page refresh.
+async function readCaseStatus(env: Env, caseId: string, userId: string): Promise<CaseStatusPayload | null> {
   await recoverStaleEvidence(env, caseId);
+  const row = await env.DB.prepare(
+    "SELECT status, data_json FROM cases WHERE id = ? AND user_id = ?",
+  ).bind(caseId, userId).first<{ status: string; data_json: string }>();
+  if (!row) return null;
   const data = parseCaseData(row.data_json);
   const analysis = data.analysis && typeof data.analysis === "object"
     ? data.analysis as Record<string, unknown>
     : {};
   const evidence = await env.DB.prepare(
-    "SELECT id, status FROM evidence WHERE case_id = ? AND status IN ('queued', 'processing') LIMIT 1",
-  ).bind(caseId).all<{ id: string; status: string }>();
+    "SELECT id, status, processing_stage, processing_progress, analysis_json FROM evidence WHERE case_id = ? ORDER BY created_at, id",
+  ).bind(caseId).all<{
+    id: string;
+    status: string;
+    processing_stage: string;
+    processing_progress: number;
+    analysis_json: string;
+  }>();
+  const materials = evidence.results.map((item) => {
+    const evidenceAnalysis = parseCaseData(item.analysis_json);
+    const error = typeof evidenceAnalysis.error === "string" ? evidenceAnalysis.error : undefined;
+    return {
+      id: item.id,
+      status: item.status,
+      processing_stage: item.processing_stage,
+      processing_progress: item.processing_progress,
+      ...(error ? { error } : {}),
+    };
+  });
   const job = await env.DB.prepare(
-    "SELECT id, status, stage, progress, error FROM generation_jobs WHERE case_id = ? AND status NOT IN ('completed', 'failed') ORDER BY created_at DESC LIMIT 1",
+    "SELECT id, status, stage, progress, error FROM generation_jobs WHERE case_id = ? ORDER BY created_at DESC LIMIT 1",
   ).bind(caseId).first<{ id: string; status: string; stage: string; progress: number; error?: string }>();
-  const payload: CaseStatusPayload = {
+  return {
     status: row.status,
     analysis_pending: analysis.status === "pending",
     analysis_status: typeof analysis.status === "string" ? analysis.status : "none",
-    materials_processing: evidence.results.length > 0,
+    materials_processing: materials.some((item) => item.status === "queued" || item.status === "processing"),
+    materials,
     job: job
       ? { id: job.id, status: job.status, stage: job.stage, progress: job.progress, error: job.error }
       : null,
   };
+}
+
+async function getCaseStatus(request: Request, env: Env, caseId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  const payload = await readCaseStatus(env, caseId, owned.user.id);
+  if (!payload) return json({ detail: "案件不存在" }, { status: 404 });
   return json(payload);
+}
+
+const SSE_STATUS_INTERVAL_MS = 2000;
+const SSE_HEARTBEAT_MS = 15000;
+const SSE_MAX_DURATION_MS = 15 * 60 * 1000;
+
+function caseStatusActive(status: CaseStatusPayload): boolean {
+  return status.analysis_pending
+    || status.materials_processing
+    || Boolean(status.job && status.job.status !== "completed" && status.job.status !== "failed");
+}
+
+function sseEvent(event: string, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function waitFor(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function streamCaseEvents(request: Request, env: Env, caseId: string): Promise<Response> {
+  const owned = await ownedCase(request, env, caseId);
+  if (owned instanceof Response) return owned;
+  const userId = owned.user.id;
+  const encoder = new TextEncoder();
+  let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let previous = "";
+      let lastHeartbeat = Date.now();
+      const startedAt = Date.now();
+      try {
+        controller.enqueue(encoder.encode("retry: 3000\n: connected\n\n"));
+        while (!cancelled && !request.signal.aborted && Date.now() - startedAt < SSE_MAX_DURATION_MS) {
+          const status = await readCaseStatus(env, caseId, userId);
+          if (!status) {
+            controller.enqueue(encoder.encode(sseEvent("failure", { detail: "案件不存在" })));
+            break;
+          }
+          const serialized = JSON.stringify(status);
+          if (serialized !== previous) {
+            controller.enqueue(encoder.encode(sseEvent("status", status)));
+            previous = serialized;
+            lastHeartbeat = Date.now();
+          } else if (Date.now() - lastHeartbeat >= SSE_HEARTBEAT_MS) {
+            controller.enqueue(encoder.encode(": heartbeat\n\n"));
+            lastHeartbeat = Date.now();
+          }
+          if (!caseStatusActive(status)) {
+            controller.enqueue(encoder.encode(sseEvent("idle", { status: "idle" })));
+            break;
+          }
+          await waitFor(SSE_STATUS_INTERVAL_MS);
+        }
+      } catch {
+        // Closing the page normally interrupts a pending D1 read or enqueue.
+      } finally {
+        cancelled = true;
+        try { controller.close(); } catch { /* stream already closed */ }
+      }
+    },
+    cancel() { cancelled = true; },
+  });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-store, no-transform",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }
 
 async function createCase(request: Request, env: Env): Promise<Response> {
@@ -2024,6 +2125,7 @@ export default {
       if (request.method === "POST" && subpath === "generate") return generateCase(request, env, caseId);
       if (request.method === "POST" && subpath === "legal-search") return legalSearch(request, env, caseId);
       if (request.method === "GET" && subpath === "status") return getCaseStatus(request, env, caseId);
+      if (request.method === "GET" && subpath === "events") return streamCaseEvents(request, env, caseId);
       if (request.method === "GET" && subpath === "generation-jobs/active") {
         return getActiveGenerationJob(request, env, caseId);
       }
