@@ -115,10 +115,11 @@ export default function CaseWorkspacePage() {
         timer = window.setTimeout(tick, backoff);
         return;
       }
-      if (last) {
-        last = null;
-        await reload();
-      }
+      // A fast task may finish before the first status poll observes the
+      // processing state. Refresh once whenever the API reports an idle case
+      // so the details view cannot remain on a stale uploading card.
+      last = null;
+      await reload();
     }
 
     void tick();
