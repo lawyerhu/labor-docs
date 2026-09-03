@@ -96,7 +96,7 @@ export default function RegisterPage() {
         <div className="auth-copy">
           <div className="eyebrow"><span /> 创建账号</div>
           <h1>注册劳动文书助手</h1>
-          <p>使用邮箱验证身份，设置密码后即可创建案件。首个案件完整免费。</p>
+          <p>使用邮箱验证身份，设置密码后即可创建案件。</p>
         </div>
         <form onSubmit={submit} className="auth-form">
           <label className="field">

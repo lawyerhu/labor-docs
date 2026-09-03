@@ -9,7 +9,7 @@ export default function Home() {
         <Brand />
         <div className="nav-actions">
           <Link className="button button-ghost" href="/login">登录</Link>
-          <Link className="button button-primary button-small" href="/register">免费创建首案</Link>
+          <Link className="button button-primary button-small" href="/register">创建案件</Link>
         </div>
       </nav>
 
@@ -20,7 +20,6 @@ export default function Home() {
           <p className="hero-lead">面向劳动者与用人单位。从案情梳理、金额核算到证据编排，一处完成。资料不齐也能先生成正式格式稿，缺项会明确标出。</p>
           <div className="hero-actions">
             <Link className="button button-primary button-large" href="/register">开始整理案件 <ArrowRight size={18} /></Link>
-            <span className="free-note"><Check size={16} /> 首个案件完整免费</span>
           </div>
         </div>
         <div className="document-scene" aria-label="生成文书示意">

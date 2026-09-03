@@ -50,12 +50,12 @@ export default function DashboardPage() {
       <AppHeader email={email} />
       <section className="dashboard container">
         <div className="dashboard-heading">
-          <div><div className="eyebrow"><span /> 我的工作台</div><h1>案件</h1><p>每个案件独立保存30天。请及时下载生成文件。</p></div>
+          <div><div className="eyebrow"><span /> 案件列表</div><h1>案件</h1><p>每个案件独立保存30天。请及时下载生成文件。</p></div>
           <Link className="button button-primary" href="/cases/new"><Plus size={18} /> 创建案件</Link>
         </div>
         {error && <div className="notice notice-error">{error}</div>}
         {loading ? <div className="loading-panel">正在读取案件…</div> : cases.length === 0 ? (
-          <div className="empty-state"><div className="empty-icon"><BriefcaseBusiness size={28} /></div><h2>还没有案件</h2><p>选择仲裁或起诉阶段，用几分钟建立第一份材料。</p><Link className="button button-primary" href="/cases/new">免费创建首案 <ArrowRight size={17} /></Link></div>
+          <div className="empty-state"><div className="empty-icon"><BriefcaseBusiness size={28} /></div><h2>还没有案件</h2><p>选择仲裁或起诉阶段，用几分钟建立第一份材料。</p><Link className="button button-primary" href="/cases/new">创建案件 <ArrowRight size={17} /></Link></div>
         ) : (
           <div className="case-list">
             {cases.map((record) => (

@@ -65,7 +65,6 @@ svg { flex: none; }
 .hero-actions { margin-top: 34px; display: flex; align-items: center; gap: 22px; }
 .free-note { display: inline-flex; align-items: center; gap: 7px; color: var(--green); font-size: 14px; font-weight: 700; }
 .document-scene { position: relative; min-height: 520px; perspective: 1100px; }
-.document-scene::before { content: ""; position: absolute; inset: 8% 2% 4% 8%; background: radial-gradient(circle, rgba(37, 99, 235, .17), rgba(37, 99, 235, 0) 68%); filter: blur(18px); }
 .document-paper { position: absolute; width: 355px; min-height: 478px; background: #fff; border: 1px solid #dce3ec; box-shadow: var(--shadow-lg); }
 .paper-back { top: 35px; left: 20%; transform: rotate(-5deg); background: linear-gradient(#fff, #f8fafc); }
 .paper-main { top: 0; left: 25%; padding: 46px 42px; transform: rotate(2deg); }
@@ -102,7 +101,6 @@ svg { flex: none; }
 
 /* Auth */
 .auth-page { min-height: 100vh; background: linear-gradient(120deg, #f7f9fc, #eef3fb); }
-.auth-page::after { content: ""; position: fixed; inset: 0; pointer-events: none; opacity: .35; background-image: linear-gradient(#dce4ef 1px, transparent 1px), linear-gradient(90deg, #dce4ef 1px, transparent 1px); background-size: 48px 48px; mask-image: linear-gradient(to bottom, transparent, black 25%, transparent 90%); }
 .auth-top { position: relative; z-index: 1; height: 78px; max-width: 1180px; padding: 0 28px; margin: auto; display: flex; justify-content: space-between; align-items: center; }
 .auth-panel { position: relative; z-index: 1; width: min(530px, calc(100% - 32px)); margin: 70px auto; padding: 44px; background: rgba(255,255,255,.94); border: 1px solid var(--line); box-shadow: var(--shadow-lg); }
 .auth-copy h1 { margin: 17px 0 12px; font-family: "Noto Serif SC", SimSun, serif; font-size: 36px; letter-spacing: -.03em; }
