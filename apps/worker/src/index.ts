@@ -116,7 +116,7 @@ async function hmacHex(secret: string, value: string): Promise<string> {
   return bytesToHex(new Uint8Array(signature));
 }
 
-const PASSWORD_ITERATIONS = 120_000;
+const PASSWORD_ITERATIONS = 100_000;
 
 async function hashPassword(password: string): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
