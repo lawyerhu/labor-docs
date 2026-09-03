@@ -6,7 +6,7 @@ from app.services.material_extraction import MaterialExtractionResult
 
 
 def test_model_timeout_keeps_extraction_and_returns_fallback(monkeypatch, tmp_path: Path):
-    async def fake_extract(_path):
+    async def fake_extract(_path, **_kwargs):
         return MaterialExtractionResult(
             text="解除劳动合同协议\n甲方：某公司",
             page_count=1,

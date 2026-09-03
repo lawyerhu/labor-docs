@@ -373,6 +373,7 @@ async def extract_material_with_vision(
     progress_callback: ExtractionProgress | None = None,
     vision_progress_callback: VisionProgress | None = None,
     vision_complete: VisionComplete = complete_vision_json,
+    enable_vision: bool = True,
 ) -> MaterialExtractionResult:
     try:
         pages = await asyncio.wait_for(
@@ -385,6 +386,8 @@ async def extract_material_with_vision(
         (page for page in pages if page.risk_score >= HIGH_RISK_THRESHOLD and page.image_bytes),
         key=lambda page: (-page.risk_score, page.number),
     )[:MAX_VISION_REVIEW_PAGES]
+    if not enable_vision:
+        candidates = []
     candidates = sorted(candidates, key=lambda page: page.number)
     reviewed: list[int] = []
     replacements: dict[int, str] = {}

@@ -61,7 +61,9 @@ summary：客观概括材料的关键内容。key_facts：字符串数组。conf
 
 
 async def analyze_material(*, case: dict[str, Any], item: dict[str, Any], path: Path) -> dict[str, Any]:
-    extraction = await extract_material_with_vision(path)
+    # Evidence upload stays on the fast text/OCR path. Visual review is
+    # reserved for full-case generation where it materially improves drafting.
+    extraction = await extract_material_with_vision(path, enable_vision=False)
     try:
         result = await analyze_evidence_text(case=case, item=item, text=extraction.text)
     except Exception as exc:
