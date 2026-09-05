@@ -408,6 +408,93 @@ function passwordValue(value: unknown): string | null {
   return value.length >= 8 && value.length <= 128 ? value : null;
 }
 
+async function requestResetPasswordCode(request: Request, env: Env): Promise<Response> {
+  const secret = env.SESSION_SECRET?.trim();
+  if (!secret) return json({ detail: "服务尚未配置" }, { status: 503 });
+  let body: { email?: unknown };
+  try {
+    body = (await request.json()) as { email?: unknown };
+  } catch {
+    return json({ detail: "请求体必须是 JSON" }, { status: 400 });
+  }
+  const email = normalizeEmail(body.email);
+  if (!email) return json({ detail: "请输入有效的邮箱地址" }, { status: 422 });
+  if (isTestAdminEmail(env, email)) return json({ detail: "该邮箱为测试管理员账号，请直接使用管理员密码登录" }, { status: 409 });
+
+  const existing = await env.DB.prepare("SELECT id, password_hash FROM users WHERE email = ?").bind(email).first<{ id: string; password_hash: string | null }>();
+  if (!existing?.password_hash) {
+    return json({ detail: "该邮箱尚未注册或未设置密码，请先注册" }, { status: 404 });
+  }
+
+  const windowStart = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  const recent = await env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM otp_codes WHERE email = ? AND purpose = 'reset' AND created_at >= ?",
+  ).bind(email, windowStart).first<{ count: number | string }>();
+  if (Number(recent?.count ?? 0) >= 5) {
+    return json({ detail: "验证码请求过于频繁，请 15 分钟后重试" }, { status: 429 });
+  }
+
+  const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0");
+  const now = new Date().toISOString();
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    "INSERT INTO otp_codes (id, email, code_hash, expires_at, attempts, purpose, created_at) VALUES (?, ?, ?, ?, 0, 'reset', ?)",
+  ).bind(id, email, await hmacHex(secret, `otp:reset:${email}:${code}`), new Date(Date.now() + 10 * 60 * 1000).toISOString(), now).run();
+
+  if (env.ENVIRONMENT === "local") return json({ message: "重置验证码已生成", dev_code: code });
+  const emailResult = await sendOtpEmail(env, email, code);
+  if (!emailResult.ok) {
+    await env.DB.prepare("DELETE FROM otp_codes WHERE id = ?").bind(id).run();
+    return json({ detail: emailResult.detail }, { status: 503 });
+  }
+  return json({ message: "重置验证码已发送至邮箱，有效期 10 分钟" });
+}
+
+async function resetPassword(request: Request, env: Env): Promise<Response> {
+  const secret = env.SESSION_SECRET?.trim();
+  if (!secret) return json({ detail: "服务尚未配置" }, { status: 503 });
+  let body: PasswordAuthBody;
+  try {
+    body = (await request.json()) as PasswordAuthBody;
+  } catch {
+    return json({ detail: "请求体必须是 JSON" }, { status: 400 });
+  }
+  const email = normalizeEmail(body.email);
+  const password = passwordValue(body.password);
+  const code = typeof body.code === "string" ? body.code.trim() : "";
+  if (!email || !password || !/^\d{6}$/.test(code)) {
+    return json({ detail: "邮箱、新密码或验证码格式不正确" }, { status: 400 });
+  }
+  if (isTestAdminEmail(env, email)) return json({ detail: "该邮箱为测试管理员账号，不允许在线重置密码" }, { status: 409 });
+
+  const record = await env.DB.prepare(
+    "SELECT id, code_hash, expires_at, attempts FROM otp_codes WHERE email = ? AND purpose = 'reset' AND consumed_at IS NULL ORDER BY created_at DESC LIMIT 1",
+  ).bind(email).first<{ id: string; code_hash: string; expires_at: string; attempts: number }>();
+  if (!record || new Date(record.expires_at).getTime() <= Date.now()) {
+    return json({ detail: "验证码无效或已过期" }, { status: 400 });
+  }
+  if (record.attempts >= 5) return json({ detail: "验证码尝试次数过多，请重新获取" }, { status: 429 });
+
+  const attempts = record.attempts + 1;
+  await env.DB.prepare("UPDATE otp_codes SET attempts = ? WHERE id = ?").bind(attempts, record.id).run();
+  const expectedHash = await hmacHex(secret, `otp:reset:${email}:${code}`);
+  if (!constantTimeEqual(record.code_hash, expectedHash)) {
+    return json({ detail: attempts >= 5 ? "验证码尝试次数过多，请重新获取" : "验证码无效或已过期" }, { status: attempts >= 5 ? 429 : 400 });
+  }
+
+  const existing = await env.DB.prepare("SELECT id, email FROM users WHERE email = ?").bind(email).first<{ id: string; email: string }>();
+  if (!existing) return json({ detail: "用户不存在" }, { status: 404 });
+
+  const now = new Date().toISOString();
+  const passwordHash = await hashPassword(password);
+  await env.DB.prepare("UPDATE otp_codes SET consumed_at = ? WHERE id = ?").bind(now, record.id).run();
+  await env.DB.prepare("UPDATE users SET password_hash = ?, email_verified = 1 WHERE id = ?").bind(passwordHash, existing.id).run();
+
+  const user: PublicUser = { id: existing.id, email: existing.email };
+  const token = await createSessionToken(secret, user);
+  return json(user, { headers: { "Set-Cookie": sessionCookie(token) } });
+}
+
 async function requestRegistrationCode(request: Request, env: Env): Promise<Response> {
   const secret = env.SESSION_SECRET?.trim();
   if (!secret) return json({ detail: "登录服务尚未配置" }, { status: 503 });
@@ -2074,6 +2161,14 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/api/auth/register-code") {
       return requestRegistrationCode(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/auth/reset-code") {
+      return requestResetPasswordCode(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/auth/reset-password") {
+      return resetPassword(request, env);
     }
 
     if (request.method === "POST" && url.pathname === "/api/auth/register") {

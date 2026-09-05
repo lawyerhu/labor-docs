@@ -46,7 +46,11 @@ export default function LoginPage() {
             <span>邮箱（登录账号）</span>
             <div className="input-with-icon"><Mail size={18} /><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required autoFocus placeholder="name@example.com" autoComplete="email" /></div>
           </label>
-          <label className="field"><span>密码</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required minLength={8} maxLength={128} autoComplete="current-password" placeholder="请输入密码" /></label>
+          <div className="field-header">
+            <span>密码</span>
+            <Link href="/forgot-password" className="text-link forgot-link">忘记密码？</Link>
+          </div>
+          <label className="field"><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required minLength={8} maxLength={128} autoComplete="current-password" placeholder="请输入密码" /></label>
           {error && <div className="form-error" role="alert">{error}</div>}
           <button className="button button-primary button-large full-width" disabled={loading}>
             {loading ? "正在登录…" : <>登录并继续 <ArrowRight size={18} /></>}

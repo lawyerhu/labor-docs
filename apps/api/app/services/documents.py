@@ -57,6 +57,20 @@ class GenerationResult:
     artifacts: list[GeneratedArtifact]
 
 
+_CLAIM_LEADING_NUMBER_RE = re.compile(
+    r"^(?:[一二三四五六七八九十]+[、.．\s]+|\d+[、.．\s]+|[（(][一二三四五六七八九十\d]+[)）][\s]*|第[一二三四五六七八九十\d]+条[、.．\s]*)"
+)
+
+
+def _strip_claim_number(value: Any) -> str:
+    cleaned = str(value or "").strip()
+    previous = None
+    while previous != cleaned:
+        previous = cleaned
+        cleaned = _CLAIM_LEADING_NUMBER_RE.sub("", cleaned).strip()
+    return cleaned
+
+
 def _get(data: dict[str, Any], path: str, label: str) -> str:
     current: Any = data
     for part in path.split("."):
@@ -143,28 +157,54 @@ def _party_text(data: dict[str, Any], role: str, prefix: str) -> list[str]:
     if not isinstance(party, dict):
         party = {}
     party_type = party.get("type") or ("company" if party.get("credit_code") else "individual")
-    lines = [f"{prefix}：{party.get('name') or f'[待填入：{prefix}名称]'}。"]
+    lines = []
     if party_type == "company":
-        lines.append(f"住所地：{party.get('address') or f'[待填入：{prefix}住所地]'}。")
-        lines.append(f"统一社会信用代码：{party.get('credit_code') or '[待填入：统一社会信用代码]'}。")
-        lines.append(
-            f"法定代表人：{party.get('legal_representative') or '[待填入：法定代表人姓名]'}，"
-            f"职务：{party.get('legal_representative_title') or '[待填入：职务]'}。"
-        )
+        name = party.get("name") or f"[待填入：{prefix}名称]"
+        address = party.get("address") or f"[待填入：{prefix}住所地]"
+        credit_code = party.get("credit_code") or "[待填入：统一社会信用代码]"
+        legal_rep = party.get("legal_representative") or "[待填入：法定代表人姓名]"
+        title = party.get("legal_representative_title") or "[待填入：职务]"
+        contact = party.get("contact") or "[待填入：联系电话]"
+        lines.append(f"{prefix}：{name}，住所地：{address}。")
+        lines.append(f"统一社会信用代码：{credit_code}。")
+        lines.append(f"法定代表人：{legal_rep}，职务：{title}，联系电话：{contact}。")
     else:
-        lines.append(
-            f"性别：{party.get('gender') or '[待填入：性别]'}，出生日期：{party.get('birth_date') or '[待填入：出生日期]'}，"
-            f"公民身份号码：{party.get('id_number') or '[待填入：身份证号码]'}。"
-        )
-        lines.append(f"住址：{party.get('address') or f'[待填入：{prefix}住所地]'}。")
-    lines.append(f"联系方式：{party.get('contact') or '[待填入：联系电话]'}。")
+        name = party.get("name") or f"[待填入：{prefix}名称]"
+        gender = party.get("gender") or "[待填入：性别]"
+        birth = party.get("birth_date") or "[待填入：出生日期]"
+        ethnicity = party.get("ethnicity") or "[待填入：民族]"
+        id_number = party.get("id_number") or "[待填入：身份证号码]"
+        address = party.get("address") or f"[待填入：{prefix}住址]"
+        contact = party.get("contact") or "[待填入：联系电话]"
+        lines.append(f"{prefix}：{name}，{gender}，{birth}出生，{ethnicity}，住{address}。")
+        lines.append(f"公民身份号码：{id_number}，联系电话：{contact}。")
     return lines
+
+
+_MONEY_AMOUNT_RE = re.compile(r"([0-9]+(?:\.[0-9]{1,2})?)\s*元")
+
+
+def _calculate_claims_total(lines: list[str]) -> float | None:
+    amounts = []
+    for line in lines:
+        match = _MONEY_AMOUNT_RE.search(line)
+        if match:
+            try:
+                amounts.append(float(match.group(1).replace(",", "")))
+            except ValueError:
+                pass
+    if len(amounts) >= 2:
+        return sum(amounts)
+    return None
 
 
 def _claim_lines(data: dict[str, Any], stage: str) -> list[str]:
     drafted = (data.get("_ai_draft") or {}).get("claims") or []
     if drafted:
-        lines = [str(item) for item in drafted]
+        lines = [_strip_claim_number(item) for item in drafted if _strip_claim_number(item)]
+        total = _calculate_claims_total(lines)
+        if total is not None and not any("合计" in item for item in lines):
+            lines.append(f"以上各项请求暂合计金额为：人民币{total:,.2f}元。")
         if stage == "litigation" and not any("诉讼费" in item for item in lines):
             lines.append("本案诉讼费用由被告承担。")
         return lines
@@ -172,18 +212,26 @@ def _claim_lines(data: dict[str, Any], stage: str) -> list[str]:
     if not claims:
         return ["[待填入：仲裁请求]" if stage == "arbitration" else "[待填入：诉讼请求]"]
     lines: list[str] = []
+    numeric_amounts = []
     for claim in claims:
         if not isinstance(claim, dict):
             claim = {"title": str(claim)}
-        title = claim.get("title") or "[待填入：请求内容]"
+        title = _strip_claim_number(claim.get("title") or "[待填入：请求内容]")
         amount = claim.get("amount")
         if amount in (None, ""):
             calculated = calculate_claim(claim.get("kind", "other"), claim.get("inputs") or {})
             amount_text = calculated.display
+            if calculated.amount is not None:
+                numeric_amounts.append(float(calculated.amount))
         else:
-            amount_text = f"{float(amount):,.2f}元"
+            val = float(amount)
+            numeric_amounts.append(val)
+            amount_text = f"{val:,.2f}元"
         basis = claim.get("basis") or "[待填入：金额、计算基数、期间或计算方式]"
         lines.append(f"{title}，金额为{amount_text}（计算依据：{basis}）。")
+    if len(numeric_amounts) >= 2:
+        total = sum(numeric_amounts)
+        lines.append(f"以上各项请求暂合计金额为：人民币{total:,.2f}元。")
     if stage == "litigation":
         lines.append("本案诉讼费用由被告承担。")
     return lines
@@ -232,7 +280,8 @@ def _fact_text(data: dict[str, Any], stage: str) -> list[str]:
 
 def _add_numbered(document: Document, lines: list[str]) -> None:
     for index, text in enumerate(lines, start=1):
-        _paragraph(document, f"{index}. {text}", indent=False)
+        clean = _strip_claim_number(text)
+        _paragraph(document, f"{index}. {clean}", indent=False)
 
 
 def _add_signature(document: Document, data: dict[str, Any], label: str, institution: str) -> None:
@@ -241,13 +290,22 @@ def _add_signature(document: Document, data: dict[str, Any], label: str, institu
     paragraph.paragraph_format.left_indent = Cm(3)
     run = paragraph.add_run(institution)
     _font(run)
-    signature = document.add_paragraph()
-    signature.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    signature.paragraph_format.space_before = Pt(2)
-    signature.paragraph_format.space_after = Pt(0)
-    signature.paragraph_format.line_spacing = 1.0
-    run = signature.add_run(f"{label}：[待签名/盖章]　日期：[待填入：提交日期]")
-    _font(run, size=11)
+
+    p_signer = document.add_paragraph()
+    p_signer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    p_signer.paragraph_format.space_before = Pt(28)
+    p_signer.paragraph_format.space_after = Pt(4)
+    p_signer.paragraph_format.line_spacing = 1.2
+    run_signer = p_signer.add_run(f"{label}：[待签名/盖章]")
+    _font(run_signer, size=12)
+
+    p_date = document.add_paragraph()
+    p_date.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    p_date.paragraph_format.space_before = Pt(0)
+    p_date.paragraph_format.space_after = Pt(0)
+    p_date.paragraph_format.line_spacing = 1.2
+    run_date = p_date.add_run("日期：[待填入：提交日期]")
+    _font(run_date, size=12)
 
 
 def _build_arbitration(path: Path, payload: dict[str, Any]) -> None:
@@ -350,7 +408,7 @@ def _build_element_complaint(path: Path, payload: dict[str, Any]) -> None:
         ("一、当事人信息", ""),
         ("原告", "\n".join(_party_text(data, "initiating", "原告"))),
         ("被告", "\n".join(_party_text(data, "opposing", "被告"))),
-        ("二、诉讼请求", "\n".join(f"{i}. {line}" for i, line in enumerate(_claim_lines(data, "litigation"), 1))),
+        ("二、诉讼请求", "\n".join(f"{i}. {_strip_claim_number(line)}" for i, line in enumerate(_claim_lines(data, "litigation"), 1))),
         ("三、劳动关系要素", "\n".join(facts[:2])),
         ("四、仲裁前置情况", arbitration_text),
         ("五、事实、理由及依据", "\n".join(facts)),
@@ -579,7 +637,12 @@ def _assemble_evidence(
     return normalized, page_ranges
 
 
-def _build_catalog(path: Path, evidence: list[dict[str, Any]], page_ranges: list[str]) -> None:
+def _build_catalog(
+    path: Path,
+    evidence: list[dict[str, Any]],
+    page_ranges: list[str],
+    payload: dict[str, Any] | None = None,
+) -> None:
     document = Document()
     _configure_document(document, landscape=True)
     _title(document, "证据目录")
@@ -599,6 +662,27 @@ def _build_catalog(path: Path, evidence: list[dict[str, Any]], page_ranges: list
         ]
         for index, value in enumerate(values):
             _set_cell(cells[index], str(value), center=index in {0, 3})
+
+    # 文末规范右对齐两行签署格式
+    stage = (payload or {}).get("case_stage") or "arbitration"
+    submit_role = "提交人（申请人）" if stage == "arbitration" else "提交人（原告）"
+
+    p_signer = document.add_paragraph()
+    p_signer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    p_signer.paragraph_format.space_before = Pt(32)
+    p_signer.paragraph_format.space_after = Pt(6)
+    p_signer.paragraph_format.line_spacing = 1.2
+    run_signer = p_signer.add_run(f"{submit_role}：[待签名/盖章]")
+    _font(run_signer, size=12)
+
+    p_date = document.add_paragraph()
+    p_date.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    p_date.paragraph_format.space_before = Pt(0)
+    p_date.paragraph_format.space_after = Pt(0)
+    p_date.paragraph_format.line_spacing = 1.2
+    run_date = p_date.add_run("日期：[待填入：提交日期]")
+    _font(run_date, size=12)
+
     document.core_properties.title = "证据目录"
     document.save(path)
 
@@ -635,7 +719,7 @@ def build_case_package(
         evidence_path = case_dir / "03-证据材料.pdf"
         evidence_items, page_ranges = _assemble_evidence(evidence_items, evidence_path)
     catalog = case_dir / "02-证据目录.docx"
-    _build_catalog(catalog, evidence_items, page_ranges)
+    _build_catalog(catalog, evidence_items, page_ranges, payload)
     artifacts.append(GeneratedArtifact("evidence_catalog", catalog.name, catalog))
     if evidence_items:
         artifacts.append(GeneratedArtifact("evidence_materials", "03-证据材料.pdf", case_dir / "03-证据材料.pdf"))

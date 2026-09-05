@@ -33,6 +33,24 @@ _PRECISE_LAW_CITATION = re.compile(
 _PAGE_RANGE_RE = re.compile(r"(\d{1,4})\s*(?:[-—–~至到])\s*(\d{1,4})")
 _SINGLE_PAGE_RE = re.compile(r"(\d{1,4})")
 
+_CLAIM_LEADING_NUMBER_RE = re.compile(
+    r"^(?:[一二三四五六七八九十]+[、.．\s]+|\d+[、.．\s]+|[（(][一二三四五六七八九十\d]+[)）][\s]*|第[一二三四五六七八九十\d]+条[、.．\s]*)"
+)
+
+
+def _strip_claim_number(text: str) -> str:
+    cleaned = str(text or "").strip()
+    previous = None
+    while previous != cleaned:
+        previous = cleaned
+        cleaned = _CLAIM_LEADING_NUMBER_RE.sub("", cleaned).strip()
+    return cleaned
+
+
+def _clean_claim_text(value: Any) -> str:
+    text = _strip_claim_number(str(value or "").strip())
+    return text
+
 
 def _parse_page_range(raw: Any) -> list[int] | None:
     if isinstance(raw, (list, tuple)) and len(raw) == 2:
@@ -150,10 +168,10 @@ async def draft_case_documents(
         )
     parsed = await complete_json(
         system="""你是中国劳动争议诉讼文书撰写律师。根据案件结构化信息和证据正文，撰写可以直接进入正式文书的中文内容，只输出JSON。
-claims：字符串数组，每项是明确、完整的仲裁请求或诉讼请求；案件信息能确定时不得改写成待填模板。确实缺少金额或计算基础时，只在该处用明确的[待填入：...]。
-facts_and_reasons：字符串数组，每项是一段连贯中文正文。按时间顺序叙述劳动关系、争议发生、仲裁经过、起诉理由和法律依据，但不得使用“劳动关系”“争议发生”“仲裁前置”“起诉理由”“法律理由”等小标题或类似分段标题。法律依据必须用法言法语穿插在叙述中，例如“根据《中华人民共和国劳动合同法》第八十七条的规定，用人单位应当……”，不得在末尾单独罗列“法律依据：……”或同类清单。不得原样堆叠用户口语，不得仅罗列字段，不得虚构材料没有的事实。
+claims：字符串数组，每项是明确、规范、完整的仲裁请求或诉讼请求。注意：用户输入的请求中可能自带了混乱、不规则的序号（例如“一、”“1.”“(1)”“请求1”或完全没有序号），你必须完全剔除用户原始输入中的各种序号，重新按诉讼文书的标准格式逐项规范梳理，并在每项开头严格统一加上“1. ”“2. ”“3. ”的标准阿拉伯数字序号（例如：“1. 裁决/判令被告向原告支付……”，“2. 裁决/判令确认双方存在劳动关系……”）。案件信息能确定时不得改写成待填模板。确实缺少金额或计算基础时，只在该处用明确的[待填入：...]。
+facts_and_reasons：字符串数组，每项是一段连贯中文正文。按时间顺序叙述劳动关系、争议发生、仲裁经过、起诉理由和法律依据，但不得使用“劳动关系”“争议发生”“仲裁前置”“起诉理由”“法律理由”等小标题或类似分段标题。法律依据只需体现与本案核心诉求直接相关的核心法律条款（例如解除劳动合同经济补偿金引用《劳动合同法》第46/47条，违法解除引用第87条，未签合同双倍工资引用第82条），不得冗余罗列次要法条或一般性宣示条款，且必须用法言法语自然穿插在叙述中（如“根据《中华人民共和国劳动合同法》第四十七条的规定……”），严禁在文末单独罗列“法律依据：……”或法条清单。不得原样堆叠用户口语，不得仅罗列字段，不得虚构材料没有的事实。
 data_patch：从案件说明及材料中能够可靠提取的结构化信息。仅返回有依据的字段，未知字段直接省略，不得猜测。可包含：
-- parties.initiating / parties.opposing：type(company/individual)、name、address、credit_code、legal_representative、legal_representative_title、gender、birth_date、id_number、contact；
+- parties.initiating / parties.opposing：type(company/individual)、name、address、credit_code、legal_representative、legal_representative_title、gender、birth_date、ethnicity、id_number、contact；
 - court：管辖法院全称；只有企业信息或案件材料足以支持时填写；
 - jurisdiction：已核验的用人单位登记地及其来源；
 - employment_facts：start_date、end_date、position、monthly_wage、summary；
@@ -170,7 +188,10 @@ missing_fields：仅列影响提交或诉请计算且无法从材料得出的关
         timeout=90,
         attempts=1,
     )
-    claims = [str(value).strip() for value in parsed.get("claims") or [] if str(value).strip()]
+    raw_claims = parsed.get("claims") or []
+    cleaned_claims = [_clean_claim_text(value) for value in raw_claims if _clean_claim_text(value)]
+    # 大模型统一规范梳理后，按规范给每项加上唯一的阿拉伯数字标准序号
+    claims = [f"{i}. {item}" for i, item in enumerate(cleaned_claims, 1)]
     research = (case.get("data") or {}).get("legal_research") if isinstance(case.get("data"), dict) else {}
     law_snapshot = research.get("law") if isinstance(research, dict) else None
     candidates = list(parsed.get("verified_law") or [])
@@ -184,21 +205,22 @@ missing_fields：仅列影响提交或诉请计算且无法从材料得出的关
         if str(value).strip()
     ]
     if legal_basis:
-        tokens = [item["citation"] for item in legal_basis]
+        # 只选取与诉求最直接相关的核心法律规定（最多2-3条核心依据），避免冗余罗列
+        core_citations = [item["citation"] for item in legal_basis[:3]]
         if "[待核验法律依据]" in "\n".join(facts):
             index = 0
 
             def _fill(_match: re.Match[str]) -> str:
                 nonlocal index
-                token = tokens[min(index, len(tokens) - 1)]
+                token = core_citations[min(index, len(core_citations) - 1)]
                 index += 1
                 return token
 
             facts = re.sub(r"\[待核验法律依据\]", _fill, "\n".join(facts)).split("\n")
         missing = [
-            item["citation"]
-            for item in legal_basis
-            if item["citation"] not in "\n".join(facts)
+            citation
+            for citation in core_citations
+            if citation not in "\n".join(facts)
         ]
         if missing and facts:
             facts[-1] = (
