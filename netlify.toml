@@ -3,5 +3,8 @@
   command = "npm run build"
   publish = ".next"
 
+[build.environment]
+  API_INTERNAL_URL = "https://labor-docs-api.fayan-research.workers.dev"
+
 [[plugins]]
   package = "@netlify/plugin-nextjs"

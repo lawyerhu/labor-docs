@@ -16,3 +16,6 @@ coverage/
 *.log
 
 # Existing case work and delivered documents are intentionally not touched.
+
+# Local Netlify folder
+.netlify

@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 
-const apiBase = process.env.API_INTERNAL_URL ?? "https://labor-docs-api.fayan-research.workers.dev";
+// Local development mirrors production: web -> local Cloudflare Worker
+// (wrangler dev on 8787) -> local generator on 8000. Deployment platforms
+// provide their API endpoint explicitly through API_INTERNAL_URL.
+const apiBase = process.env.API_INTERNAL_URL ?? "http://127.0.0.1:8787";
 
 const nextConfig: NextConfig = {
   async rewrites() {
