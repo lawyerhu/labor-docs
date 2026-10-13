@@ -1,0 +1,42 @@
+.page { padding-top: 40px; padding-bottom: 64px; }
+.heading, .panelHeading { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.heading h1 { margin: 12px 0 8px; font-size: 32px; }
+.heading p, .panelHeading p, .login p { color: var(--muted-text); margin: 0; }
+.updated { margin: 28px 0 16px; color: var(--muted-text); font-size: 13px; }
+.metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 0; }
+.metric { padding: 22px; border: 1px solid var(--line); background: var(--paper); border-radius: 8px; }
+.metric dt { color: var(--ink-soft); font-size: 14px; font-weight: 650; }
+.metric dd { margin: 8px 0; font-size: 36px; font-weight: 750; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.metric small { color: var(--muted-text); font-size: 12px; }
+.note { margin: 16px 0 28px; color: var(--muted-text); font-size: 13px; line-height: 1.7; }
+.panel { margin-top: 24px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); overflow: hidden; }
+.panelHeading { padding: 22px 24px; }
+.panelHeading h2 { margin: 0 0 4px; font-size: 18px; }
+.panelHeading p { font-size: 13px; }
+.search { display: flex; align-items: center; gap: 8px; }
+.search input { width: 220px; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line-dark); border-radius: 7px; background: var(--paper); color: var(--ink); }
+.tableScroll { overflow-x: auto; }
+.table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.table th, .table td { padding: 14px 24px; text-align: left; white-space: nowrap; border-top: 1px solid var(--line); }
+.table th { color: var(--ink-soft); background: var(--canvas); font-size: 13px; font-weight: 650; }
+.table td strong { font-weight: 600; }
+.table td small { display: block; margin-top: 3px; color: var(--muted-text); font-size: 12px; }
+.table tbody tr:hover { background: var(--canvas); }
+.empty { padding: 24px; margin: 0; text-align: center; color: var(--muted-text); }
+.pagination { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid var(--line); padding: 16px 24px; color: var(--muted-text); font-size: 13px; }
+.pagination > div { display: flex; gap: 8px; }
+.login { max-width: 460px; margin: 40px auto; padding: 32px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+.login > svg { color: var(--blue); }
+.login h2 { margin: 12px 0; font-size: 22px; }
+.login p { font-size: 14px; margin-bottom: 24px; }
+.srOnly { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (max-width: 760px) {
+  .heading, .panelHeading { align-items: flex-start; flex-direction: column; gap: 16px; }
+  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .metric { padding: 16px; }
+  .search { width: 100%; }
+  .search input { flex: 1; width: 0; min-width: 0; }
+  .panelHeading, .table th, .table td { padding-left: 16px; padding-right: 16px; }
+  .pagination { align-items: flex-start; flex-direction: column; padding: 16px; }
+  .login { padding: 24px; }
+}

@@ -10,6 +10,7 @@ import { api, CaseRecord, formatDate } from "@/lib/api";
 export default function DashboardPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
   const [cases, setCases] = useState<CaseRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [deletingCaseId, setDeletingCaseId] = useState<string | null>(null);
@@ -18,11 +19,11 @@ export default function DashboardPage() {
   useEffect(() => {
     let cancelled = false;
     Promise.allSettled([
-      api<{ email: string }>("/api/auth/me"),
+      api<{ email: string; is_admin?: boolean }>("/api/auth/me"),
       api<CaseRecord[]>("/api/cases"),
     ]).then(([userResult, casesResult]) => {
       if (cancelled) return;
-      if (userResult.status === "fulfilled") setEmail(userResult.value.email);
+      if (userResult.status === "fulfilled") { setEmail(userResult.value.email); setIsAdmin(Boolean(userResult.value.is_admin)); }
       else if ((userResult.reason as Error & { status?: number })?.status === 401) router.replace("/login");
       if (casesResult.status === "fulfilled") setCases(casesResult.value);
       else setError((casesResult.reason as Error)?.message || "案件列表加载失败");
@@ -47,7 +48,7 @@ export default function DashboardPage() {
 
   return (
     <main className="app-shell" id="main-content">
-      <AppHeader email={email} />
+      <AppHeader email={email} isAdmin={isAdmin} />
       <section className="dashboard container">
         <div className="dashboard-heading">
           <div><div className="eyebrow"><span /> 案件列表</div><h1>案件</h1><p>每个案件独立保存30天。请及时下载生成文件。</p></div>

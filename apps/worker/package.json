@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "wrangler dev --env local",
     "typecheck": "tsc --noEmit",
+    "test:admin": "node --test tests/admin.test.mjs",
     "deploy": "wrangler deploy --env=\"\"",
     "db:migrate:local": "wrangler d1 migrations apply labor-docs --local",
     "db:migrate:remote": "wrangler d1 migrations apply labor-docs --remote"

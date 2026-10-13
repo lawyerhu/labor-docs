@@ -59,6 +59,7 @@ interface Env {
   TEST_ADMIN_ENABLED?: string;
   TEST_ADMIN_EMAIL?: string;
   TEST_ADMIN_PASSWORD?: string;
+  ADMIN_EMAIL?: string;
 }
 
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
@@ -69,7 +70,12 @@ const EVIDENCE_STALE_MS = 15 * 60 * 1000;
 const CASE_ANALYSIS_TIMEOUT_MS = 120 * 1000;
 const EMAIL_SEND_TIMEOUT_MS = 45 * 1000;
 
-type PublicUser = { id: string; email: string; unlimited_generation?: boolean };
+type PublicUser = { id: string; email: string; unlimited_generation?: boolean; is_admin?: boolean };
+
+function isAdmin(env: Env, email: string): boolean {
+  const configured = normalizeEmail(env.ADMIN_EMAIL ?? env.TEST_ADMIN_EMAIL);
+  return Boolean(configured && configured === email.trim().toLowerCase());
+}
 
 function testAdminOnly(env: Env): boolean {
   return env.TEST_ADMIN_ENABLED?.trim().toLowerCase() === "true";
@@ -212,7 +218,7 @@ async function currentUser(request: Request, env: Env): Promise<PublicUser | nul
   const session = await readSessionToken(token, secret);
   if (!session) return null;
   const user = await env.DB.prepare("SELECT id, email FROM users WHERE id = ?").bind(session.id).first<PublicUser>();
-  return user ? { ...user, unlimited_generation: isTestAdmin(env, user) } : null;
+  return user ? { ...user, unlimited_generation: isTestAdmin(env, user), is_admin: isAdmin(env, user.email) } : null;
 }
 
 type EmailSendResult = { ok: true } | { ok: false; detail: string };
@@ -2132,6 +2138,59 @@ async function purgeExpiredCases(env: Env): Promise<void> {
   }
 }
 
+async function adminOverview(request: Request, env: Env): Promise<Response> {
+  const headers = { "Cache-Control": "no-store, private", Vary: "Cookie" };
+  const user = await currentUser(request, env);
+  if (!user) return json({ detail: "请先登录管理员账号" }, { status: 401, headers });
+  if (!user.is_admin) return json({ detail: "仅管理员可查看运营后台" }, { status: 403, headers });
+
+  const url = new URL(request.url);
+  const rawPage = Number(url.searchParams.get("page") ?? "1");
+  if (!Number.isSafeInteger(rawPage) || rawPage < 1 || rawPage > 100000) {
+    return json({ detail: "页码无效" }, { status: 400, headers });
+  }
+  const search = (url.searchParams.get("search") ?? "").trim().toLowerCase();
+  if (search.length > 254) return json({ detail: "搜索内容过长" }, { status: 400, headers });
+  const pageSize = 20;
+  const adminEmail = normalizeEmail(env.ADMIN_EMAIL ?? env.TEST_ADMIN_EMAIL) ?? "";
+  const since = new Date(Date.now() - 7 * 86400000).toISOString();
+  const pattern = `%${search.replace(/[\\%_]/g, "\\$&")}%`;
+  try {
+    const [accounts, usage, matching, users, recentJobs] = await env.DB.batch<Record<string, unknown>>([
+      env.DB.prepare(`SELECT COUNT(*) AS total_accounts,
+        COALESCE(SUM(lower(email) <> ?), 0) AS registered_users,
+        COALESCE(SUM(lower(email) <> ? AND created_at >= ?), 0) AS new_users_7d FROM users`)
+        .bind(adminEmail, adminEmail, since),
+      env.DB.prepare(`SELECT COUNT(*) AS retained_cases,
+        COUNT(DISTINCT user_id) AS accounts_with_cases,
+        COALESCE(SUM(generation_count), 0) AS successful_generations,
+        (SELECT COUNT(*) FROM generation_jobs WHERE status IN ('queued','dispatched','running','finalizing')) AS pending_jobs,
+        (SELECT COUNT(*) FROM generation_jobs WHERE status = 'failed') AS failed_jobs FROM cases`),
+      env.DB.prepare("SELECT COUNT(*) AS total FROM users WHERE lower(email) LIKE ? ESCAPE '\\'").bind(pattern),
+      env.DB.prepare(`SELECT u.id, u.email, u.created_at, u.email_verified,
+        COALESCE(c.case_count, 0) AS case_count, COALESCE(c.generation_count, 0) AS generation_count, c.last_case_at
+        FROM users u LEFT JOIN (SELECT user_id, COUNT(*) AS case_count,
+          SUM(generation_count) AS generation_count, MAX(created_at) AS last_case_at FROM cases GROUP BY user_id) c ON c.user_id = u.id
+        WHERE lower(u.email) LIKE ? ESCAPE '\\' ORDER BY u.created_at DESC, u.id LIMIT ? OFFSET ?`)
+        .bind(pattern, pageSize, (rawPage - 1) * pageSize),
+      env.DB.prepare(`SELECT j.id, u.email, j.status, j.created_at, j.updated_at
+        FROM generation_jobs j JOIN cases c ON c.id = j.case_id JOIN users u ON u.id = c.user_id
+        ORDER BY j.created_at DESC, j.id LIMIT 10`),
+    ]);
+    return json({
+      admin_email: user.email,
+      generated_at: new Date().toISOString(),
+      stats: { ...accounts.results[0], ...usage.results[0] },
+      users: users.results.map((row) => ({ ...row, is_admin: isAdmin(env, String(row.email)) })),
+      pagination: { page: rawPage, page_size: pageSize, total: Number(matching.results[0]?.total ?? 0) },
+      recent_jobs: recentJobs.results,
+    }, { headers });
+  } catch (error) {
+    console.error("Admin overview query failed", error);
+    return json({ detail: "统计读取失败，请稍后重试" }, { status: 503, headers });
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -2193,6 +2252,10 @@ export default {
     if (request.method === "GET" && url.pathname === "/api/auth/me") {
       const user = await currentUser(request, env);
       return user ? json(user) : json({ detail: "请先登录" }, { status: 401 });
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/admin/overview") {
+      return adminOverview(request, env);
     }
 
     if (request.method === "GET" && url.pathname === "/api/cases") {
